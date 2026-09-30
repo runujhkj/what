@@ -294,6 +294,8 @@ function resolveWhatCli() {
 // Build once with: native/what-coreaudio-tap/build.sh
 function resolveTapApp() {
   if (process.env.WHAT_TAP_APP) return process.env.WHAT_TAP_APP;
+  // Packaged macOS app: the prebuilt tap ships in resources/bin (see scripts/package/build_macos.sh).
+  if (app.isPackaged) return path.join(process.resourcesPath, "bin", "WhatCoreAudioTap.app");
   return path.join(__dirname, "..", "bin", "WhatCoreAudioTap.app");
 }
 
@@ -797,6 +799,11 @@ app.whenReady().then(() => {
     // Bundled tools (ffmpeg) come first on PATH for every helper process.
     const bundledBin = path.join(process.resourcesPath, "bin");
     if (fs.existsSync(bundledBin)) process.env.PATH = `${bundledBin}${path.delimiter}${process.env.PATH || ""}`;
+    // The macOS app ships the prebuilt WhisperKit worker next to ffmpeg.
+    const bundledWorker = path.join(bundledBin, "what-whisperkit-worker");
+    if (process.platform === "darwin" && !process.env.WHAT_WHISPERKIT_WORKER && fs.existsSync(bundledWorker)) {
+      process.env.WHAT_WHISPERKIT_WORKER = bundledWorker;
+    }
     // A writable home for the CUDA runtime wheels (the install folder may be read-only).
     if (!process.env.WHAT_CUDA_TARGET) process.env.WHAT_CUDA_TARGET = path.join(app.getPath("userData"), "cuda-runtime");
   }

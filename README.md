@@ -21,10 +21,13 @@ The workflow and UI are identical across platforms. What differs underneath is t
 engine and the desktop-audio backend, chosen automatically per platform (see the table
 below). No cloud services and no account are involved.
 
-## Download (Windows)
+## Download
 
-Get `what-<version>-x64-setup.exe` from the [latest release](../../releases/latest) and run
-it. Nothing else needs to be installed: the app brings its own Python and FFmpeg, and it
+Get the file for your platform from the [latest release](../../releases/latest).
+
+### Windows
+
+Download `what-<version>-x64-setup.exe` and run it. Nothing else needs to be installed: the app brings its own Python and FFmpeg, and it
 installs per user, without administrator rights.
 
 - **"Windows protected your PC":** the installer is not code-signed yet, so SmartScreen
@@ -38,7 +41,30 @@ installs per user, without administrator rights.
 - Settings, the GPU runtime, and recordings live in `%APPDATA%\What`; uninstalling the app
   leaves that folder in place.
 
-macOS and Linux run from source for now (see [Setup](#setup)).
+### macOS (Apple Silicon)
+
+Download `what-<version>-arm64.dmg` (or the `-mac.zip`), drag **What** to Applications.
+Nothing else needs to be installed: the app brings its own Python and FFmpeg.
+
+- **"What can't be opened" / unidentified developer:** the app is not signed with an Apple
+  Developer ID, so Gatekeeper blocks the first launch. Right-click the app and choose
+  **Open**, then **Open** again; or allow it under **System Settings → Privacy & Security**.
+  If macOS says the app is damaged, run `xattr -dr com.apple.quarantine /Applications/What.app`.
+- **Permissions:** allow Microphone, and Screen Recording for **What System Audio** (desktop
+  capture). The grant may need repeating after an update because the app is ad-hoc signed.
+- **First Start** downloads the speech model; later starts are offline.
+
+See [macOS packaging](docs/packaging_macos.md). This build has had less testing than the
+from-source path below.
+
+### Linux
+
+Download `what-<version>-x86_64.AppImage`, `chmod +x` it and run it. It needs **Python 3.12**
+(with `venv`) and **FFmpeg** on the machine, and creates its Python environment in
+`~/.config/What` on first start (Internet required). See [Linux packaging](docs/packaging_linux.md).
+The AppImage is newer than the Windows installer and has had less testing.
+
+Each platform can also run from source (see [Setup](#setup)).
 
 ## Platform status
 
@@ -55,8 +81,7 @@ These results are not a full v0.1 release certification. See the
 
 ## Setup
 
-Running from source (all platforms; on Windows the [installer](#download-windows) is the
-easy path). All platforms need **Python 3.12**, **Node.js/npm**, and **FFmpeg on PATH**. First model
+Running from source (all platforms; the [downloads](#download) above are the easy path). All platforms need **Python 3.12**, **Node.js/npm**, and **FFmpeg on PATH**. First model
 initialization needs Internet access to download the speech model; later cached loads are
 local. Per-platform helper scripts live in `scripts/setup/`.
 
