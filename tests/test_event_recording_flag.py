@@ -40,3 +40,14 @@ def test_enricher_records_asr_engine_and_model():
     event = {}
     make_enricher(runtime, "mic-abc", "mic", recorded=True)(event)
     assert (event["asr_engine"], event["asr_model"]) == ("whisperkit", "base")
+
+
+def test_enricher_stamps_recording_wall_clock_start():
+    event = {}
+    make_enricher(_runtime(), "desktop-x", "desktop", "e000000000000", recorded=True,
+                  stream_started_at=1758191878.12345)(event)
+    assert event["stream_started_at"] == 1758191878.123
+    # Without an anchor (e.g. HTTP ingest) the field is left out rather than guessed.
+    event = {}
+    make_enricher(_runtime(), "http-client")(event)
+    assert "stream_started_at" not in event

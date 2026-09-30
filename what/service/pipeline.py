@@ -35,7 +35,8 @@ def get_stream_worker(runtime: ServiceRuntime, stream_key: str) -> tuple[Any, th
 
 
 def make_enricher(runtime: ServiceRuntime, client_id: str, input_mode: str = "mic",
-                  recording_epoch: str = "", recorded: bool = False):
+                  recording_epoch: str = "", recorded: bool = False,
+                  stream_started_at: float | None = None):
     asr_cfg = getattr(runtime, "asr_cfg", None)
     asr_engine = resolve_engine_name(asr_cfg) if asr_cfg is not None else ""
     asr_model = str((getattr(asr_cfg, "model_path", None) or getattr(asr_cfg, "model_size", "")) or "")
@@ -49,6 +50,11 @@ def make_enricher(runtime: ServiceRuntime, client_id: str, input_mode: str = "mi
         # where segment/word abs times are WAV offsets. Review uses it to explain
         # unavailable audio instead of assuming a recording exists.
         event["recorded"] = bool(recorded)
+        # Wall-clock time (epoch s) of sample 0 of that recording. abs times are offsets
+        # from it, which is what orders segments from different sources in one transcript
+        # (what/session_files.py).
+        if stream_started_at is not None:
+            event["stream_started_at"] = round(float(stream_started_at), 3)
         # Which recognizer produced the text, so corrections record reproducible context.
         event["asr_engine"] = asr_engine
         event["asr_model"] = asr_model
@@ -66,6 +72,7 @@ def start_client_pipeline(
     timeline_offset_sec: float = 0.0,
     recording_epoch: str = "",
     recorded: bool = False,
+    stream_started_at: float | None = None,
 ) -> tuple[threading.Thread, list[str]]:
     client_output_cfg = OutputConfig(
         text_stream=False,
@@ -97,7 +104,8 @@ def start_client_pipeline(
             asr_cfg=runtime.asr_cfg,
             output_cfg=client_output_cfg,
             on_event=_on_event,
-            event_enricher=make_enricher(runtime, client_id, input_mode, recording_epoch, recorded),
+            event_enricher=make_enricher(runtime, client_id, input_mode, recording_epoch, recorded,
+                                         stream_started_at),
             stats_hook=runtime.stats.update,
             stop_event=stop_event,
             shared_asr=stream_asr,

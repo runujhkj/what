@@ -67,6 +67,20 @@ def add_log_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--id", type=int, default=None)
 
 
+def add_session_args(parser: argparse.ArgumentParser) -> None:
+    sub = parser.add_subparsers(dest="session_command")
+    transcript = sub.add_parser("transcript", help="write transcript.txt for a session folder")
+    transcript.add_argument("session_dir")
+    pack = sub.add_parser("pack", help="write transcript.txt and <session_id>.what for a session folder")
+    pack.add_argument("session_dir")
+    pack.add_argument("--copy-to", default=None, help="also copy the .what file here")
+    unpack = sub.add_parser("unpack", help="restore a .what file into the logs folder")
+    unpack.add_argument("archive")
+    unpack.add_argument("--logs-dir", default=None, help="default: WHAT_JSONL_DIR or ./logs")
+    for p in (transcript, pack, unpack):
+        p.add_argument("--json", action="store_true", help="print a JSON result line")
+
+
 def add_controller_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)

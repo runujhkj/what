@@ -8,6 +8,7 @@ from .args_commands import (
     add_log_args,
     add_pair_args,
     add_service_args,
+    add_session_args,
     add_start_args,
     add_view_args,
 )
@@ -56,6 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
     # too -- without them `what pair -k KEY` raised AttributeError on args.config.
     add_config_args(pair_parser)
     add_pair_args(pair_parser)
+
+    session_parser = subparsers.add_parser("session")
+    add_session_args(session_parser)
 
     log_parser = subparsers.add_parser("log")
     add_log_args(log_parser)

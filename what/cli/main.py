@@ -11,12 +11,13 @@ from .handle_pair import handle_pair
 from .handle_run import handle_run
 from .handle_start import handle_start
 from .handle_service import handle_service
+from .handle_session import handle_session
 from .handle_view import handle_view
 from .parser import build_parser
 from ..env import load_env
 
 
-COMMANDS = {"run", "service", "client", "view", "pair", "log", "control", "control-client", "start", "gui"}
+COMMANDS = {"run", "service", "client", "view", "pair", "log", "session", "control", "control-client", "start", "gui"}
 
 
 def main() -> None:
@@ -43,6 +44,10 @@ def main() -> None:
 
     if args.command == "log":
         handle_log(args)
+        return
+
+    if args.command == "session":
+        handle_session(args)
         return
 
     if args.command == "control":

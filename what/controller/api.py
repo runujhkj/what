@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 
 from ..gpu import detect_gpu
+from ..session_files import finalize_session
 from . import desktop_audio_manager
 from .controller_payloads import (
     merge_settings as _merge_settings_impl,
@@ -58,7 +59,10 @@ def create_controller_app(cfg: ControllerConfig, state: ControllerState) -> Fast
             _stop_stream_event_lane_impl(state=state)
             stop_client(state.client_process)
             stop_service(state.process)
+            session_id = state.current_session_id
             _close_process_log(state, clear_session=True)
+            if session_id:
+                finalize_session(_resolve_log_root(cfg) / session_id)
 
     app = FastAPI(title="what-controller", lifespan=lifespan)
 
@@ -88,6 +92,7 @@ def create_controller_app(cfg: ControllerConfig, state: ControllerState) -> Fast
         clamp_float=_clamp_float,
         desktop_audio_receipt_path=_desktop_audio_receipt_path,
         detect_gpu_fn=detect_gpu,
+        session_dir_for=lambda session_id: _resolve_log_root(cfg) / session_id,
     )
 
     register_stream_routes(
