@@ -255,3 +255,21 @@ def test_auto_budget_keeps_two_workers_on_8gb_pascal_within_vram():
                                    query=lambda: [{"name": "x", "total_mb": 8192, "used_mb": 1400}])
     steps = warmup.fallback_steps(cfg, budget_mb=budget, max_workers=2, supported=PASCAL)
     assert steps[0] == ("cuda:medium/int8_float32", "cuda", "int8_float32", "medium")
+
+
+def test_windows_nul_stdin_is_not_interactive():
+    # On Windows isatty() is True for NUL (the controller's subprocess.DEVNULL); only a real
+    # console answers GetConsoleMode. Treating NUL as a terminal made GUI services prompt.
+    service = importlib.import_module("what.service.run")
+    tty = SimpleNamespace(isatty=lambda: True)
+    assert service.stdin_is_interactive(tty, os_name="nt", console_mode=lambda s: False) is False
+    assert service.stdin_is_interactive(tty, os_name="nt", console_mode=lambda s: True) is True
+    assert service.stdin_is_interactive(tty, os_name="posix") is True
+    assert service.stdin_is_interactive(SimpleNamespace(isatty=lambda: False), os_name="nt") is False
+
+
+def test_real_devnull_is_not_interactive_here():
+    import os
+    service = importlib.import_module("what.service.run")
+    with open(os.devnull) as devnull:
+        assert service.stdin_is_interactive(devnull) is False

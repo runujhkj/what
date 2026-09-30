@@ -1,3 +1,4 @@
+import os
 import sys
 
 import uvicorn
@@ -7,6 +8,37 @@ from ..cli.helpers import make_session_label
 from ..env import get_env
 from .app import create_app
 from .warmup import decode_preflight as _decode_preflight
+
+
+def stdin_is_interactive(stdin=None, os_name=None, console_mode=None) -> bool:
+    """True only when a person can answer a prompt on stdin.
+
+    isatty() alone is wrong on Windows: it is True for the NUL device, which is what the
+    GUI's controller gives the service (subprocess.DEVNULL). The service then took the
+    interactive path there -- a synchronous model load before binding the port, and on a
+    GPU failure an input() prompt that died on EOF. A real console also answers
+    GetConsoleMode; NUL and pipes do not.
+    """
+    stdin = sys.stdin if stdin is None else stdin
+    try:
+        if stdin is None or not stdin.isatty():
+            return False
+    except (AttributeError, ValueError, OSError):
+        return False
+    if (os.name if os_name is None else os_name) != "nt":
+        return True
+    if console_mode is None:
+        def console_mode(stream):
+            import ctypes
+            import msvcrt
+
+            mode = ctypes.c_uint32()
+            handle = msvcrt.get_osfhandle(stream.fileno())
+            return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+    try:
+        return bool(console_mode(stdin))
+    except (AttributeError, ValueError, OSError):
+        return False
 
 
 def _whisperkit_preflight(asr_cfg):
@@ -41,7 +73,7 @@ def run_service(
     device_is_cuda = str(getattr(asr_cfg, "device", "")).lower().startswith("cuda")
     if resolve_engine_name(asr_cfg) == "whisperkit":
         spare_asr = _whisperkit_preflight(asr_cfg)
-    elif device_is_cuda and sys.stdin.isatty():
+    elif device_is_cuda and stdin_is_interactive():
         # Interactive direct launch: keep the synchronous prompt path so a human at the
         # terminal still chooses whether to fall back to CPU.
         try:
