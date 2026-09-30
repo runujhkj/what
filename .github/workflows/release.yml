@@ -1,24 +1,63 @@
 name: Release
 
-# Push a tag like v0.1.0 to build the installers and attach them to a draft GitHub
-# Release (publish it from the Releases page after checking the notes). Run manually
-# (workflow_dispatch) to build the artifacts without creating a release.
+# Two ways to make a release (a draft: publish it from the Releases page after checking
+# the notes):
+# - Actions -> Release -> Run workflow, with a version such as 0.2.0. The release is made
+#   from the chosen branch's latest commit; publishing it creates the tag v0.2.0.
+# - Push a tag such as v0.2.0.
+# A manual run with the version left empty only builds the installers (downloadable from the
+# run's Artifacts) and makes no release.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.2.0 (leave empty to only build)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
 jobs:
+  # The version being released ("" when only building): from the tag, or the manual input.
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: version
+        env:
+          INPUT: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="$GITHUB_REF_NAME"; else v="$INPUT"; fi
+          v="$(echo "$v" | tr -d '[:space:]')"; v="${v#v}"
+          if [ -n "$v" ]; then
+            if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::The version must look like 0.2.0 (got '$v')."; exit 1
+            fi
+            if [ "$GITHUB_REF_TYPE" != tag ] && git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null; then
+              echo "::error::v$v already exists. Pick a new version number."; exit 1
+            fi
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${v:-none (build only)}"
+
   windows:
+    needs: version
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      # Installer file names and the app's About version come from gui/package.json.
+      - name: Set app version
+        if: needs.version.outputs.version != ''
+        shell: bash
+        run: npm --prefix gui version "${{ needs.version.outputs.version }}" --no-git-tag-version --allow-same-version
       # The runner image has Node, CMake and the VS 2022 C++ tools, so nothing is installed.
       - name: Build installer
         shell: pwsh
@@ -30,12 +69,18 @@ jobs:
           if-no-files-found: error
 
   linux:
+    needs: version
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      # Installer file names and the app's About version come from gui/package.json.
+      - name: Set app version
+        if: needs.version.outputs.version != ''
+        shell: bash
+        run: npm --prefix gui version "${{ needs.version.outputs.version }}" --no-git-tag-version --allow-same-version
       - name: Build AppImage
         run: |
           npm --prefix gui ci
@@ -50,12 +95,18 @@ jobs:
   # (CSC_LINK = base64 .p12, CSC_KEY_PASSWORD, and for notarization APPLE_ID,
   # APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID); see docs/packaging_macos.md.
   macos:
+    needs: version
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      # Installer file names and the app's About version come from gui/package.json.
+      - name: Set app version
+        if: needs.version.outputs.version != ''
+        shell: bash
+        run: npm --prefix gui version "${{ needs.version.outputs.version }}" --no-git-tag-version --allow-same-version
       - name: Build app
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -75,8 +126,8 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux, macos]
+    if: needs.version.outputs.version != ''
+    needs: [version, windows, linux, macos]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -85,6 +136,9 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: What v${{ needs.version.outputs.version }}
           draft: true
           generate_release_notes: true
           files: dist/*
