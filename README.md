@@ -171,10 +171,13 @@ In the GUI, choose Mic and/or Desktop and press Start. Use Settings to select th
 device, publication delay, or a local audio file for testing. On macOS, follow the microphone
 and desktop-audio permission prompts.
 
+<p align="center"><img src="docs/images/gui-replay.png" alt="The What window with separate Mic and Desktop transcript panels, replaying a Desktop passage" width="720"></p>
+
 - Scroll up to review speech; **Return to live** resumes following new speech.
 - Cmd- or Ctrl-click a word to replay its recording; untimed or corrected segments use
   passage-level timing. Stop playback with the playback control or Escape.
-- Double-click a segment to correct it; Enter saves and Escape cancels.
+- Double-click a segment to correct it; Enter saves and Escape cancels. Corrected segments are
+  underlined.
 - Change **Mic device** while running to reopen that input without restarting the service.
   **Transcript playback output** routes replay independently of the system default. Runtime
   switching is implemented with regression tests; hardware acceptance checks are still pending.
@@ -186,10 +189,24 @@ Each run writes two files into its session folder (**File → Show Session Folde
 
 - `transcript.txt`: everything that was said, from all sources, in time order. Each block
   shows its time span and source (`Mic` or `Desktop`); review corrections are applied and
-  marked `(edited)`.
+  marked `(edited)`:
+
+  ```
+  [14:05:13 - 14:05:16] Mic
+      Okay, I think everyone's here. Can you hear me all right?
+
+  [14:05:17 - 14:05:18] Desktop
+      Yep, loud and clear.
+
+  [14:05:20 - 14:05:29] Mic (edited)
+      Great. So the plan today is to go over the release checklist for the Mac build. The
+      installer is done, and the transcript files are new in v0.1.
+  ```
 - `<session_id>.what`: the whole session in one file (each source's recording and segment
   log, corrections, transcript), with the audio compressed losslessly (FLAC). It is written
   when the session stops and refreshed after edits.
+
+<p align="center"><img src="docs/images/gui-edit.png" alt="A reopened session with a Mic segment selected for correction" width="720"></p>
 
 **File → Open Session…** (Cmd/Ctrl+O) opens a `.what` file, also one copied from another
 machine. Mic and desktop go back into their own panels, with replay and editing as during a
