@@ -1,4 +1,7 @@
 import json
+import os
+import random
+import shutil
 import subprocess
 import sys
 import wave
@@ -59,6 +62,15 @@ def _correction(client_id, segment_id, revision, text):
         "segment_ids": [segment_id], "revision": revision,
         "edit_type": "replace" if text else "delete", "corrected_text": text,
     }
+
+
+HAVE_FFMPEG = bool(os.environ.get("WHAT_FFMPEG") or shutil.which("ffmpeg"))
+needs_ffmpeg = pytest.mark.skipif(not HAVE_FFMPEG, reason="FFmpeg not installed")
+
+
+@pytest.fixture
+def no_ffmpeg(monkeypatch):
+    monkeypatch.setattr("what.session_files._ffmpeg", lambda: None)
 
 
 @pytest.fixture
@@ -128,16 +140,16 @@ def test_empty_session_says_so(tmp_path):
     assert "No transcribed speech in this session." in render_transcript(d)
 
 
-def test_pack_writes_transcript_and_a_self_contained_archive(session):
+def test_pack_writes_transcript_and_a_self_contained_archive(session, no_ffmpeg):
     (session / "process.log").write_text("2026-09-18T10:37:58 started\n")
     path = pack_session(session)
     assert path == archive_path(session) == session / f"{SESSION}.what"
     assert (session / "transcript.txt").exists()
     manifest = read_manifest(path)
     assert manifest["session_id"] == SESSION
-    assert {(s["source"], s["transcript"], s["recording"]) for s in manifest["sources"]} == {
-        ("mic", "mic-aaaa1111.jsonl", "mic-aaaa1111.wav"),
-        ("desktop", "desktop-bbbb2222.jsonl", "desktop-bbbb2222.wav"),
+    assert {(s["source"], s["transcript"], s["recording"], s["recording_file"]) for s in manifest["sources"]} == {
+        ("mic", "mic-aaaa1111.jsonl", "mic-aaaa1111.wav", "mic-aaaa1111.wav"),
+        ("desktop", "desktop-bbbb2222.jsonl", "desktop-bbbb2222.wav", "desktop-bbbb2222.wav"),
     }
     with zipfile.ZipFile(path) as zf:
         names = set(zf.namelist())
@@ -237,3 +249,55 @@ def test_pack_removes_old_leftovers_of_an_interrupted_pack(session):
     pack_session(session)
     assert not stale.exists()
     assert fresh.exists()  # may belong to a pack still running
+
+
+def _speechlike_wav(path, seconds=20, rate=16000):
+    """Bursts of noise (standing in for speech) between stretches of near-silence."""
+    rng = random.Random(7)
+    frames = bytearray()
+    for i in range(seconds * 10):  # 100 ms blocks
+        loud = (i // 15) % 2 == 0
+        for _ in range(rate // 10):
+            v = int(rng.gauss(0, 3000 if loud else 30))
+            frames += max(-32768, min(32767, v)).to_bytes(2, "little", signed=True)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(bytes(frames))
+
+
+@needs_ffmpeg
+def test_recordings_are_stored_as_lossless_flac(session, tmp_path):
+    _speechlike_wav(session / "mic-aaaa1111.wav")
+    original = (session / "mic-aaaa1111.wav").read_bytes()
+    archive = pack_session(session)
+    manifest = read_manifest(archive)
+    mic = next(s for s in manifest["sources"] if s["client_id"] == "mic-aaaa1111")
+    assert mic["recording_file"] == "mic-aaaa1111.flac"
+    assert (mic["recording_codec"], mic["sample_rate"], mic["channels"]) == ("flac", 16000, 1)
+    assert mic["recording_bytes"] == len(original)
+    with zipfile.ZipFile(archive) as zf:
+        assert "mic-aaaa1111.wav" not in zf.namelist()
+        assert zf.getinfo("mic-aaaa1111.flac").file_size < len(original) * 0.8
+    # Bit-exact on the way back, with the canonical header replay and the service expect.
+    restored = unpack_session(archive, tmp_path / "other")
+    assert (restored / "mic-aaaa1111.wav").read_bytes() == original
+
+
+@needs_ffmpeg
+def test_a_recording_still_being_written_is_packed_up_to_its_current_length(session):
+    wav = session / "mic-aaaa1111.wav"
+    with wav.open("ab") as fh:
+        fh.write(b"\x01\x00" * 1600 + b"\x07")  # header not yet updated; half a frame at the end
+    manifest = read_manifest(pack_session(session))
+    mic = next(s for s in manifest["sources"] if s["client_id"] == "mic-aaaa1111")
+    assert mic["recording_bytes"] == wav.stat().st_size - 1
+
+
+@needs_ffmpeg
+def test_opening_flac_recordings_without_ffmpeg_says_what_is_missing(session, tmp_path, monkeypatch):
+    archive = pack_session(session)
+    monkeypatch.setattr("what.session_files._ffmpeg", lambda: None)
+    with pytest.raises(SessionFileError, match="FFmpeg is needed"):
+        unpack_session(archive, tmp_path / "other")

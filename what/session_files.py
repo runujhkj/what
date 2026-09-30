@@ -12,7 +12,8 @@ This module adds:
 
 - ``transcript.txt``: every source merged in wall-clock order, each block labelled by source.
 - ``<session_id>.what``: a zip archive holding a manifest plus all of the above, so a session
-  can be reopened (viewed, edited, replayed, continued) on this or another machine.
+  can be reopened (viewed, edited, replayed, continued) on this or another machine. Recordings
+  are stored as FLAC (lossless) when FFmpeg is available, else as the WAV itself.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import textwrap
 import time
@@ -298,6 +300,93 @@ def _app_version() -> str:
         return ""
 
 
+WAV_HEADER_BYTES = 44
+
+
+def _ffmpeg() -> str | None:
+    return os.environ.get("WHAT_FFMPEG") or shutil.which("ffmpeg")
+
+
+def _pcm_wav_format(path: Path) -> tuple[int, int] | None:
+    """(sample_rate, channels) of a canonical 44-byte-header 16-bit PCM WAV, as the service
+    writes (what/service/recording.py); None for anything else."""
+    try:
+        with path.open("rb") as fh:
+            header = fh.read(WAV_HEADER_BYTES)
+    except OSError:
+        return None
+    if (len(header) < WAV_HEADER_BYTES or header[0:4] != b"RIFF" or header[8:16] != b"WAVEfmt "
+            or int.from_bytes(header[16:20], "little") != 16 or header[36:40] != b"data"):
+        return None
+    audio_format = int.from_bytes(header[20:22], "little")
+    channels = int.from_bytes(header[22:24], "little")
+    sample_rate = int.from_bytes(header[24:28], "little")
+    bits = int.from_bytes(header[34:36], "little")
+    if audio_format != 1 or bits != 16 or channels < 1 or sample_rate < 1:
+        return None
+    return sample_rate, channels
+
+
+def _encode_flac(ffmpeg: str, wav: Path, out: Path, sample_rate: int, channels: int) -> int:
+    """Encode the WAV's PCM to FLAC; returns the number of PCM bytes encoded.
+
+    The PCM is fed through stdin, sized from the file length rather than the header: a
+    recording that is still being written has a header that lags its data.
+    """
+    frame_bytes = 2 * channels
+    pcm_bytes = (wav.stat().st_size - WAV_HEADER_BYTES) // frame_bytes * frame_bytes
+    proc = subprocess.Popen(
+        [ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-y",
+         "-f", "s16le", "-ar", str(sample_rate), "-ac", str(channels), "-i", "pipe:0",
+         "-c:a", "flac", "-f", "flac", str(out)],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    assert proc.stdin is not None
+    try:
+        with wav.open("rb") as fh:
+            fh.seek(WAV_HEADER_BYTES)
+            remaining = pcm_bytes
+            while remaining > 0:
+                chunk = fh.read(min(remaining, 1024 * 1024))
+                if not chunk:
+                    break
+                proc.stdin.write(chunk)
+                remaining -= len(chunk)
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass
+    stderr = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
+    if proc.wait() != 0:
+        raise SessionFileError(f"FLAC encoding failed for {wav.name}: {stderr.strip()[-300:]}")
+    return pcm_bytes - remaining
+
+
+def _decode_flac(ffmpeg: str, flac: Path, wav: Path, sample_rate: int, channels: int) -> int:
+    """Decode FLAC to a canonical 44-byte-header WAV (the layout replay and the service
+    expect); returns the number of PCM bytes written."""
+    import wave
+
+    proc = subprocess.Popen(
+        [ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-i", str(flac),
+         "-f", "s16le", "-ar", str(sample_rate), "-ac", str(channels), "pipe:1"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None
+    written = 0
+    with wave.open(str(wav), "wb") as out:
+        out.setnchannels(channels)
+        out.setsampwidth(2)
+        out.setframerate(sample_rate)
+        while True:
+            chunk = proc.stdout.read(1024 * 1024)
+            if not chunk:
+                break
+            out.writeframesraw(chunk)
+            written += len(chunk)
+    stderr = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
+    if proc.wait() != 0:
+        raise SessionFileError(f"FLAC decoding failed for {flac.name}: {stderr.strip()[-300:]}")
+    return written
+
+
 def build_manifest(session_dir: Path) -> dict[str, Any]:
     session_dir = Path(session_dir)
     sources = []
@@ -305,12 +394,16 @@ def build_manifest(session_dir: Path) -> dict[str, Any]:
         first = next(_read_jsonl(log), None) or {}
         client_id = str(first.get("client_id") or log.stem)
         wav = log.with_suffix(".wav")
-        sources.append({
+        entry: dict[str, Any] = {
             "client_id": client_id,
             "source": source_of(first, client_id),
             "transcript": log.name,
+            # The recording's name in the session folder (always .wav), and the member of the
+            # archive that holds it ("recording_file"; set by pack_session).
             "recording": wav.name if wav.exists() else None,
-        })
+        }
+        sources.append(entry)
+
     def optional(name: str) -> str | None:
         return name if (session_dir / name).exists() else None
 
@@ -356,22 +449,42 @@ def pack_session(session_dir: Path, copy_to: Path | None = None) -> Path:
         raise SessionFileError(f"unexpected session folder name: {session_dir.name}")
     write_transcript(session_dir)
     manifest = build_manifest(session_dir)
-    members = [s["transcript"] for s in manifest["sources"]]
-    members += [s["recording"] for s in manifest["sources"] if s["recording"]]
-    members += [manifest[k] for k in ("corrections", "transcript", "process_log") if manifest[k]]
-
     target = archive_path(session_dir)
     _remove_stale_temp_files(session_dir, target.name)
     fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(session_dir))
     os.close(fd)
+    scratch = Path(tempfile.mkdtemp(prefix=".pack-", dir=str(session_dir)))
+    ffmpeg = _ffmpeg()
     try:
+        # (archive member name, file on disk, zip compression)
+        members: list[tuple[str, Path, int]] = []
+        for source in manifest["sources"]:
+            members.append((source["transcript"], session_dir / source["transcript"], zipfile.ZIP_DEFLATED))
+            if not source["recording"]:
+                continue
+            wav = session_dir / source["recording"]
+            fmt = _pcm_wav_format(wav)
+            if ffmpeg and fmt:
+                flac_name = Path(source["recording"]).with_suffix(".flac").name
+                pcm_bytes = _encode_flac(ffmpeg, wav, scratch / flac_name, *fmt)
+                source.update(recording_file=flac_name, recording_codec="flac",
+                              sample_rate=fmt[0], channels=fmt[1],
+                              recording_bytes=WAV_HEADER_BYTES + pcm_bytes)
+                members.append((flac_name, scratch / flac_name, zipfile.ZIP_STORED))
+            else:
+                # No FFmpeg (or an unexpected WAV layout): store the WAV itself. PCM barely
+                # deflates, so storing keeps packing fast.
+                source.update(recording_file=source["recording"], recording_codec="pcm",
+                              recording_bytes=wav.stat().st_size)
+                members.append((source["recording"], wav, zipfile.ZIP_STORED))
+        for key in ("corrections", "transcript", "process_log"):
+            if manifest[key]:
+                members.append((manifest[key], session_dir / manifest[key], zipfile.ZIP_DEFLATED))
         with zipfile.ZipFile(tmp, "w", allowZip64=True) as zf:
             zf.writestr(MANIFEST_NAME, json.dumps(manifest, indent=2) + "\n",
                         compress_type=zipfile.ZIP_DEFLATED)
-            for name in members:
-                # PCM barely compresses; storing keeps packing a long session fast.
-                kind = zipfile.ZIP_STORED if name.endswith(".wav") else zipfile.ZIP_DEFLATED
-                zf.write(session_dir / name, arcname=name, compress_type=kind)
+            for arcname, path, kind in members:
+                zf.write(path, arcname=arcname, compress_type=kind)
         os.replace(tmp, target)
     except BaseException:
         try:
@@ -379,6 +492,8 @@ def pack_session(session_dir: Path, copy_to: Path | None = None) -> Path:
         except OSError:
             pass
         raise
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     if copy_to is not None:
         copy_to = Path(copy_to)
         if copy_to.resolve() != target.resolve():
@@ -430,6 +545,15 @@ def unpack_session(archive: Path, logs_dir: Path) -> Path:
     manifest = read_manifest(archive)
     session_id = str(manifest["session_id"])
     target = Path(logs_dir) / session_id
+    # FLAC members are decoded back to the session folder's .wav (see pack_session).
+    encoded: dict[str, dict[str, Any]] = {}
+    for source in manifest.get("sources") or []:
+        if not isinstance(source, dict) or source.get("recording_codec") != "flac":
+            continue
+        names = (str(source.get("recording_file") or ""), str(source.get("recording") or ""))
+        if not all(is_safe_name(n) for n in names) or not names[1].endswith(".wav"):
+            raise SessionFileError(f"invalid recording entry in {archive}")
+        encoded[names[0]] = source
     with zipfile.ZipFile(archive) as zf:
         infos = [i for i in zf.infolist() if i.filename != MANIFEST_NAME and not i.is_dir()]
         for info in infos:
@@ -448,6 +572,9 @@ def unpack_session(archive: Path, logs_dir: Path) -> Path:
                     raise SessionFileError(
                         f"{target} already holds a different session named {session_id}")
         for info in infos:
+            if info.filename in encoded:
+                _restore_flac(zf, info, target, encoded[info.filename])
+                continue
             dest = target / info.filename
             if dest.exists() and dest.stat().st_size >= info.file_size:
                 continue
@@ -464,6 +591,33 @@ def unpack_session(archive: Path, logs_dir: Path) -> Path:
                 raise
     write_transcript(target)
     return target
+
+
+def _restore_flac(zf: zipfile.ZipFile, info: zipfile.ZipInfo, target: Path,
+                  source: dict[str, Any]) -> None:
+    dest = target / str(source["recording"])
+    expected = int(source.get("recording_bytes") or 0)
+    if dest.exists() and dest.stat().st_size >= expected:
+        return  # the local recording is the same or longer
+    ffmpeg = _ffmpeg()
+    if not ffmpeg:
+        raise SessionFileError(
+            "FFmpeg is needed to open this session's recordings (install it, or put it on PATH)")
+    scratch = Path(tempfile.mkdtemp(prefix=".unpack-", dir=str(target)))
+    try:
+        flac = scratch / info.filename
+        with zf.open(info) as src, flac.open("wb") as out:
+            shutil.copyfileobj(src, out, 1024 * 1024)
+        wav = scratch / dest.name
+        written = _decode_flac(ffmpeg, flac, wav, int(source.get("sample_rate") or 16000),
+                               int(source.get("channels") or 1))
+        # Lossless round trip: anything else means a damaged file, not a usable recording.
+        if expected and WAV_HEADER_BYTES + written != expected:
+            raise SessionFileError(
+                f"{info.filename} decoded to {written} bytes of audio, expected {expected - WAV_HEADER_BYTES}")
+        os.replace(wav, dest)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def finalize_session(session_dir: Path, log=None) -> Path | None:

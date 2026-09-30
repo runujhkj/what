@@ -188,8 +188,8 @@ Each run writes two files into its session folder (**File → Show Session Folde
   shows its time span and source (`Mic` or `Desktop`); review corrections are applied and
   marked `(edited)`.
 - `<session_id>.what`: the whole session in one file (each source's recording and segment
-  log, corrections, transcript). It is written when the session stops and refreshed after
-  edits.
+  log, corrections, transcript), with the audio compressed losslessly (FLAC). It is written
+  when the session stops and refreshed after edits.
 
 **File → Open Session…** (Cmd/Ctrl+O) opens a `.what` file, also one copied from another
 machine. Mic and desktop go back into their own panels, with replay and editing as during a

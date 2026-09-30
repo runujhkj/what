@@ -39,8 +39,9 @@ Accepted limitations for v0.1.
 - Earlier sessions are reopened only through **File → Open Session** with their `.what`
   file. A session whose run ended without the controller stopping it (a crash or a killed
   process) has no `.what` file yet; `what session pack logs/<session_id>` writes one.
-- A `.what` file stores the recordings uncompressed, so it takes about as much disk space as
-  the session folder (about 115 MB per source per hour).
+- The session folder keeps its recordings as uncompressed WAV (about 115 MB per source per
+  hour) so they can be replayed and appended to directly; only the `.what` copy is
+  compressed (FLAC). Without FFmpeg the `.what` file stores the WAV as is.
 - Opening a `.what` file by double-clicking it is not set up yet; use File → Open Session.
 - Replay through speakers can still be picked up by a live microphone. Desktop capture is
   silenced during replay, but the mic is not; use headphones or stop the mic source.

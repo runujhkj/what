@@ -52,9 +52,19 @@ It is refreshed when a source disconnects, when the session stops, after review 
 A `.what` file is a zip archive:
 
 - `manifest.json`: `{"format": "what.session", "version": 1, "session_id", "created_at",
-  "app_version", "sources": [{"client_id", "source", "transcript", "recording"}],
-  "corrections", "transcript", "process_log"}` (file names, or `null` when absent).
-- The files listed in the manifest, flat (no folders). Recordings are stored uncompressed.
+  "app_version", "sources": [...], "corrections", "transcript", "process_log"}` (file names,
+  or `null` when absent). Each source is `{"client_id", "source", "transcript", "recording",
+  "recording_file", "recording_codec", "recording_bytes"}` plus `"sample_rate"` and
+  `"channels"` for FLAC: `recording` is the `.wav` name in the session folder,
+  `recording_file` the archive member holding it.
+- The files listed in the manifest, flat (no folders).
+
+Recordings are stored as FLAC (`recording_codec: "flac"`), which is lossless: opening the
+file decodes them back to byte-identical WAVs (checked against `recording_bytes`), so replay
+positions and appending on Continue are unaffected. Speech with pauses typically takes half
+or less of the WAV's size. Packing and opening FLAC need FFmpeg (bundled with the Windows
+and macOS apps, required on Linux anyway); without it a `.what` file stores the WAV as is
+(`recording_codec: "pcm"`), and a file with FLAC recordings cannot be opened.
 
 It is written when the controller stops a session (Stop, or quitting the app) and when edits
 are saved in review. Opening one (File → Open Session, or `what session unpack`) restores
