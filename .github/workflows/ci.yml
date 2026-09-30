@@ -13,11 +13,11 @@ jobs:
         os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -26,7 +26,17 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
           npm --prefix gui ci
+      # Failing tests are also emitted as annotations, which (unlike step logs) are
+      # readable without signing in to GitHub.
       - name: Python tests
-        run: python -m pytest -q
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q -rfE --tb=short 2>&1 | tee pytest.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E "^(FAILED|ERROR) " pytest.log | head -20 | while read -r line; do echo "::error::$line"; done
+          fi
+          exit "$status"
       - name: GUI tests
         run: npm --prefix gui test
