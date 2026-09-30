@@ -23,7 +23,9 @@ const fs = require("fs");
 const DEPENDENCIES = [
   "setuptools<81",
   "fastapi",
-  "faster-whisper",
+  // Apple Silicon transcribes with the WhisperKit worker (what/asr.py resolve_engine_name);
+  // faster-whisper and its native libraries would only slow Gatekeeper's first-launch scan.
+  "faster-whisper; sys_platform != 'darwin'",
   "numpy",
   "soundcard; sys_platform == 'win32'",
   "uvicorn",

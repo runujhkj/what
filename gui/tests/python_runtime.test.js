@@ -17,7 +17,7 @@ function testNeedsProvision() {
 
 function testDependenciesMirrorPyproject() {
   // Deps-only install (not the `what` package). setuptools guards webrtcvad's pkg_resources.
-  assert.ok(pr.DEPENDENCIES.includes("faster-whisper"));
+  assert.ok(pr.DEPENDENCIES.some((d) => d.startsWith("faster-whisper")));
   assert.ok(pr.DEPENDENCIES.includes("webrtcvad-wheels"));
   assert.ok(pr.DEPENDENCIES.some((d) => d.startsWith("setuptools")));
   assert.ok(!pr.DEPENDENCIES.some((d) => d.startsWith("-e") || d.includes("[")));

@@ -46,13 +46,16 @@ installs per user, without administrator rights.
 Download `what-<version>-arm64.dmg` (or the `-mac.zip`), drag **What** to Applications.
 Nothing else needs to be installed: the app brings its own Python and FFmpeg.
 
-- **"Apple could not verify 'What'…" / "What is damaged" (offers Move to Trash):** the app
-  is not signed with an Apple Developer ID or notarized, so Gatekeeper blocks it. Choose
-  **Done** (not Move to Trash), then either:
-  - open **System Settings → Privacy & Security**, scroll to the message about "What" and
-    click **Open Anyway** (macOS 15 and later no longer allow right-click → Open); or
-  - in Terminal: `xattr -dr com.apple.quarantine /Applications/What.app`, then open the app.
-    This also works when macOS says the app is damaged.
+- **First launch:** the app is not signed with an Apple Developer ID or notarized, so
+  Gatekeeper blocks it ("Apple could not verify 'What'…" or "What is damaged", offering
+  Move to Trash). Choose **Done**, then clear the download flag in Terminal and open it:
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/What.app
+  open /Applications/What.app
+  ```
+  **System Settings → Privacy & Security → Open Anyway** also approves it, but Gatekeeper's
+  first-launch check of the app can then take a long time, leaving the app in the Dock with
+  no window. If that happens, quit it and use the commands above.
 - **Permissions:** allow Microphone, and Screen Recording for **What System Audio** (desktop
   capture). The grant may need repeating after an update because the app is ad-hoc signed.
 - **First Start** downloads the speech model; later starts are offline.

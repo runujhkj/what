@@ -20,8 +20,12 @@ the `macos` job in `.github/workflows/release.yml`). It:
 There is no Developer ID, so the build is **ad-hoc signed** (`gui/build-hooks/adhoc-sign.js`,
 needed because Apple-silicon Macs refuse a bundle with a broken signature; the build
 checks it with `codesign --verify`). Gatekeeper blocks the downloaded app on first launch
-with a "could not verify" / Move to Trash dialog; the README gives the Open Anyway and
-`xattr` workarounds. The Screen Recording grant for the tap can also reset when the app
+with a "could not verify" / Move to Trash dialog. After **Open Anyway**, the first launch was
+observed to hang: the process sat at `_dyld_start` (0% CPU, nothing loaded) while the bundle
+was still quarantined, and it launched immediately once `xattr -dr com.apple.quarantine`
+cleared the flag. The README therefore leads with the `xattr` command. To make that check
+cheaper the build leaves out faster-whisper (unused on Apple Silicon) and unused parts of
+CPython (tests, Tk). The Screen Recording grant for the tap can also reset when the app
 is updated.
 
 To sign and notarize properly you need the Apple Developer Program (US$99/year). Then add
@@ -34,7 +38,7 @@ notarization `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`.
 - Launch the built app on a clean Mac; check the model download, mic capture, desktop capture
   (Screen Recording prompt for "What System Audio") and replay.
 - The bundled ffmpeg must list avfoundation devices; the build prints the first lines.
-- The Python dependencies still include `faster-whisper` (shared list); it is unused on macOS
-  and could be dropped for a smaller app.
+- Whether notarization (Developer ID) also removes the first-launch hang; it should, as
+  notarized apps skip most of the local assessment.
 - The WhisperKit model (`base`) downloads on first start; it is not pre-provisioned.
 - Apple Silicon only; no Intel build.

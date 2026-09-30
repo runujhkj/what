@@ -55,6 +55,13 @@ if [ ! -f "$py/.what-deps" ]; then
   "$py/bin/python3" -m pip install --disable-pip-version-check "${deps[@]}"
   "$py/bin/python3" -c "import webrtcvad, fastapi, uvicorn, websockets, zeroconf, numpy; print('python deps ok')"
   find "$py" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
+  # Parts of CPython the app never uses. Every file here is scanned by Gatekeeper on the
+  # first launch of the downloaded app, so less is faster.
+  stdlib="$py/lib/python3.12"
+  rm -rf "$stdlib/test" "$stdlib/idlelib" "$stdlib/tkinter" "$stdlib/turtledemo" \
+         "$stdlib/ensurepip" "$stdlib/lib-dynload/_tkinter"*.so
+  rm -rf "$py"/lib/tcl* "$py"/lib/tk* "$py"/lib/itcl* "$py"/lib/thread* "$py"/lib/libtcl* "$py"/lib/libtk*
+  echo "bundled python: $(find "$py" -type f | wc -l | tr -d ' ') files, $(du -sh "$py" | cut -f1)"
   date -u +%FT%TZ > "$py/.what-deps"
 fi
 
