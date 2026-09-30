@@ -7,7 +7,7 @@ for (const stream of [process.stdout, process.stderr]) {
   if (stream && typeof stream.on === "function") stream.on("error", () => {});
 }
 const { stopProcess } = require("./lib/client_process_stop");
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, screen } = require("electron");
 // Keep settings, the GPU runtime and (packaged) logs under a stable "What" folder rather
 // than one named after the npm package. Must run before anything reads userData.
 {
@@ -241,8 +241,13 @@ const overlayServerRuntime = overlayServerRuntimeFactory.createOverlayServerRunt
   logError: (...args) => console.error(...args)
 });
 
+function displayWorkAreas() {
+  try { return screen.getAllDisplays().map((d) => d.workArea); } catch (_) { return []; }
+}
+
 function loadWindowState() {
-  return windowStateStore.loadWindowStateFromDisk(fs, windowStatePath, { width: 900, height: 700 });
+  const saved = windowStateStore.loadWindowStateFromDisk(fs, windowStatePath, { width: 900, height: 700 });
+  return windowStateStore.fitToDisplays(saved, displayWorkAreas());
 }
 
 function saveWindowState(win) {
@@ -250,7 +255,8 @@ function saveWindowState(win) {
 }
 
 function loadDesktopStubWindowState() {
-  return windowStateStore.loadWindowStateFromDisk(fs, desktopStubWindowStatePath, { width: 520, height: 420 });
+  const saved = windowStateStore.loadWindowStateFromDisk(fs, desktopStubWindowStatePath, { width: 520, height: 420 });
+  return windowStateStore.fitToDisplays(saved, displayWorkAreas());
 }
 
 function saveDesktopStubWindowState(win) {
@@ -829,7 +835,39 @@ function startPackagedController() {
   }
 }
 
+// A packaged app has no console, so a startup error would otherwise leave the app in the
+// Dock with no window and no explanation. Record it and tell the user.
+function reportStartupError(step, err) {
+  const text = `${new Date().toISOString()} ${step}: ${(err && err.stack) || err}\n`;
+  console.error(text);
+  try { fs.appendFileSync(path.join(app.getPath("userData"), "startup-errors.log"), text); } catch (_) {}
+  try { dialog.showErrorBox("What: startup error", `${step} failed:\n\n${(err && err.message) || err}`); } catch (_) {}
+}
+
 app.whenReady().then(() => {
+  try {
+    prepareRuntime();
+  } catch (err) {
+    reportStartupError("Preparing the runtime", err);
+  }
+  if (String(process.env.WHAT_GUI_MODE || "").trim() === "desktop-audio-stub") {
+    createDesktopAudioStubWindow();
+  } else {
+    createWindow();
+  }
+  overlayServerRuntime.start();
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      if (String(process.env.WHAT_GUI_MODE || "").trim() === "desktop-audio-stub") {
+        createDesktopAudioStubWindow();
+      } else {
+        createWindow();
+      }
+    }
+  });
+}).catch((err) => reportStartupError("Starting the app", err));
+
+function prepareRuntime() {
   retireLegacyTapAgent();
   // Packaged: the default cwd (bundled source) is read-only, so point the Python side's
   // recordings/transcripts at the writable logs dir. Inherited by every spawn below.
@@ -850,23 +888,10 @@ app.whenReady().then(() => {
     if (!process.env.WHAT_CUDA_TARGET) process.env.WHAT_CUDA_TARGET = path.join(app.getPath("userData"), "cuda-runtime");
   }
   ensurePackagedPythonRuntime();
-  preparePackagedGpuRuntime().then(startPackagedController);
-  if (String(process.env.WHAT_GUI_MODE || "").trim() === "desktop-audio-stub") {
-    createDesktopAudioStubWindow();
-  } else {
-    createWindow();
-  }
-  overlayServerRuntime.start();
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      if (String(process.env.WHAT_GUI_MODE || "").trim() === "desktop-audio-stub") {
-        createDesktopAudioStubWindow();
-      } else {
-        createWindow();
-      }
-    }
-  });
-});
+  preparePackagedGpuRuntime()
+    .then(startPackagedController)
+    .catch((err) => reportStartupError("Starting the controller", err));
+}
 
 // Ask the controller to cleanly stop its child processes (transcription client
 // + Whisper service) before we SIGTERM the controller process itself.

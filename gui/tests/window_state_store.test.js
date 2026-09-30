@@ -68,7 +68,25 @@ function testSaveWritesWhenWindowValid() {
   assert.ok(calls[1][2].includes('"width":1000'));
 }
 
+function testFitToDisplays() {
+  const laptop = [{ x: 0, y: 25, width: 1512, height: 920 }];
+  const onScreen = { width: 900, height: 700, x: 100, y: 100 };
+  assert.deepStrictEqual(store.fitToDisplays(onScreen, laptop), onScreen);
+  // Saved on an external monitor to the right that is no longer connected.
+  const offScreen = { width: 900, height: 700, x: 2200, y: 100 };
+  assert.deepStrictEqual(store.fitToDisplays(offScreen, laptop), { width: 900, height: 700 });
+  // Title bar above the top of the screen.
+  assert.deepStrictEqual(store.fitToDisplays({ width: 900, height: 700, x: 100, y: -600 }, laptop),
+    { width: 900, height: 700 });
+  // Still visible on a second display.
+  const two = [...laptop, { x: 1512, y: 0, width: 1920, height: 1080 }];
+  assert.deepStrictEqual(store.fitToDisplays(offScreen, two), offScreen);
+  // No position saved: unchanged.
+  assert.deepStrictEqual(store.fitToDisplays({ width: 900, height: 700 }, laptop), { width: 900, height: 700 });
+}
+
 testLoadFallbackOnMissingOrMalformed();
+testFitToDisplays();
 testLoadValidAndClamp();
 testSaveWritesWhenWindowValid();
 console.log("window_state_store.test.js: ok");

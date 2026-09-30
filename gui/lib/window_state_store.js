@@ -24,6 +24,21 @@ function loadWindowStateFromDisk(fs, filePath, fallback) {
   }
 }
 
+// Drop a saved position that would put the window's title bar on no current display (for
+// example a monitor that has since been unplugged); the window then opens centered.
+// workAreas: [{ x, y, width, height }] from electron's screen.getAllDisplays().
+function fitToDisplays(state, workAreas) {
+  if (!state || !Number.isFinite(state.x) || !Number.isFinite(state.y)) return state;
+  const areas = Array.isArray(workAreas) ? workAreas : [];
+  const titleBar = { x: state.x, y: state.y, width: state.width, height: 40 };
+  const visible = areas.some((a) =>
+    titleBar.x + 100 <= a.x + a.width && titleBar.x + titleBar.width - 100 >= a.x &&
+    titleBar.y < a.y + a.height && titleBar.y + titleBar.height > a.y);
+  if (visible) return state;
+  const { x, y, ...rest } = state;
+  return rest;
+}
+
 function saveWindowStateToDisk(fs, path, filePath, win) {
   if (!win || (typeof win.isDestroyed === "function" && win.isDestroyed())) return;
   try {
@@ -37,5 +52,6 @@ function saveWindowStateToDisk(fs, path, filePath, win) {
 
 module.exports = {
   loadWindowStateFromDisk,
+  fitToDisplays,
   saveWindowStateToDisk
 };
