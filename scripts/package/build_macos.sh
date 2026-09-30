@@ -17,6 +17,12 @@
 set -euo pipefail
 
 target="${1:-dist}"
+
+# CI passes unset repository secrets as empty strings; electron-builder treats an empty
+# CSC_LINK as a path (the current directory) and fails, so drop empty signing variables.
+for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+  [ -n "${!v:-}" ] || unset "$v"
+done
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 gui="$root/gui"
 build="$gui/build"
