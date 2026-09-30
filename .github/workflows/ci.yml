@@ -36,6 +36,9 @@ jobs:
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             grep -E "^(FAILED|ERROR) " pytest.log | head -20 | while read -r line; do echo "::error::$line"; done
+            # Assertion/exception detail ("E   ..." lines) as one multi-line annotation.
+            details=$(grep -E "^E  " pytest.log | head -60 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            [ -n "$details" ] && echo "::error title=pytest details::$details"
           fi
           exit "$status"
       - name: GUI tests

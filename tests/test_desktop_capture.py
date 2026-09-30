@@ -37,7 +37,9 @@ def test_windows_named_device_uses_ffmpeg_dshow(monkeypatch):
     monkeypatch.setattr(dc.os, "name", "nt")
     monkeypatch.setattr(dc, "run_wasapi_loopback", lambda out: (_ for _ in ()).throw(AssertionError("no loopback")))
     monkeypatch.setattr("what.desktop_audio._dshow_audio_devices", lambda: [])
-    monkeypatch.setattr(dc.sys, "argv", ["desktop_capture", "--device", "Stereo Mix (Realtek)"])
+    # Explicit backend: patching os.name alone doesn't make platform.system() say Windows.
+    monkeypatch.setattr(dc.sys, "argv", ["desktop_capture", "--device", "Stereo Mix (Realtek)",
+                                         "--backend", "wasapi"])
     ran = []
 
     class FakeProc:
