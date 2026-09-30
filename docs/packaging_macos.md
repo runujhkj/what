@@ -18,9 +18,11 @@ the `macos` job in `.github/workflows/release.yml`). It:
 ## Signing
 
 There is no Developer ID, so the build is **ad-hoc signed** (`gui/build-hooks/adhoc-sign.js`,
-needed because Apple-silicon Macs refuse a bundle with a broken signature). Users see
-Gatekeeper's unidentified-developer prompt (README explains the workaround), and the Screen
-Recording grant for the tap can reset when the app is updated.
+needed because Apple-silicon Macs refuse a bundle with a broken signature; the build
+checks it with `codesign --verify`). Gatekeeper blocks the downloaded app on first launch
+with a "could not verify" / Move to Trash dialog; the README gives the Open Anyway and
+`xattr` workarounds. The Screen Recording grant for the tap can also reset when the app
+is updated.
 
 To sign and notarize properly you need the Apple Developer Program (US$99/year). Then add
 these repository secrets; the workflow and script pick them up with no other change:

@@ -92,4 +92,7 @@ if [ "$target" = "dir" ]; then
 else
   npx electron-builder --mac dmg zip --arm64 --publish never ${extra[@]+"${extra[@]}"}
 fi
+# Fail the build on a broken signature: Gatekeeper reports such an app as "damaged".
+codesign --verify --deep --strict --verbose=2 dist/mac-arm64/What.app
+codesign -dv dist/mac-arm64/What.app 2>&1 | grep -E "^(Identifier|Signature|Authority|TeamIdentifier)" || true
 ls -la dist
