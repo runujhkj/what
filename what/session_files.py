@@ -327,6 +327,22 @@ def build_manifest(session_dir: Path) -> dict[str, Any]:
     }
 
 
+STALE_TEMP_SEC = 3600
+
+
+def _remove_stale_temp_files(folder: Path, name: str) -> None:
+    # A pack cut short (the app killed mid-write) leaves ".<name>.<random>" behind, as large
+    # as the recordings. Old ones are safe to remove; a recent one may belong to a pack that
+    # is still running.
+    cutoff = time.time() - STALE_TEMP_SEC
+    for tmp in folder.glob(f".{name}.*"):
+        try:
+            if tmp.stat().st_mtime < cutoff:
+                tmp.unlink()
+        except OSError:
+            pass
+
+
 def pack_session(session_dir: Path, copy_to: Path | None = None) -> Path:
     """Refresh transcript.txt and write ``<session_dir>/<session_id>.what``.
 
@@ -345,6 +361,7 @@ def pack_session(session_dir: Path, copy_to: Path | None = None) -> Path:
     members += [manifest[k] for k in ("corrections", "transcript", "process_log") if manifest[k]]
 
     target = archive_path(session_dir)
+    _remove_stale_temp_files(session_dir, target.name)
     fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(session_dir))
     os.close(fd)
     try:
@@ -387,7 +404,10 @@ def read_manifest(archive: Path) -> dict[str, Any]:
         raise SessionFileError(f"not a What session file: {archive} ({exc})") from exc
     if not isinstance(manifest, dict) or manifest.get("format") != ARCHIVE_FORMAT:
         raise SessionFileError(f"not a What session file: {archive}")
-    if int(manifest.get("version") or 0) > ARCHIVE_VERSION:
+    version = manifest.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise SessionFileError(f"not a What session file: {archive} (bad version)")
+    if version > ARCHIVE_VERSION:
         raise SessionFileError(
             f"{archive} was written by a newer version of What (format v{manifest.get('version')})")
     if not is_safe_name(str(manifest.get("session_id") or "")):

@@ -28,6 +28,18 @@ const transcript = window.whatGuiTranscriptRecord.createTranscriptStore();
 // Live controller status from the last poll.
 let lastStatus = null;
 
+// A session reopened with File → Open Session. While set, Start adds to that session
+// (the controller resumes it) instead of clearing the panels for a new one.
+let openedSessionId = null;
+// The session the panels show, reported to the main process for File → Save/Show.
+let shownSessionId = null;
+
+function showSession(sessionId) {
+  if (sessionId === shownSessionId) return;
+  shownSessionId = sessionId;
+  if (typeof CTRL.setSessionContext === "function") CTRL.setSessionContext(sessionId).catch(() => {});
+}
+
 // ── Transitions ───────────────────────────────────────────────────────────────
 
 function transition(action, payload) {
@@ -43,8 +55,10 @@ function transition(action, payload) {
     case "STARTING":
       state.phase = "starting";
       stopReplay();
-      transcript.clear();
-      for (const panel of Object.values(panels)) panel.clear();
+      if (!(payload && payload.keepTranscript)) {
+        transcript.clear();
+        for (const panel of Object.values(panels)) panel.clear();
+      }
       captionBridge.start();
       break;
     case "STARTED":
@@ -243,6 +257,7 @@ const captionBridge = window.whatGuiLiveCaptionBridge.createLiveCaptionBridge({
   onEvent: (event, source) => {
     const added = transcript.ingest(event, source);
     if (added.length) panels[source === "desktop" ? "desktop" : "mic"].append(added);
+    if (event && event.session_id) showSession(String(event.session_id));
   },
 });
 
@@ -477,8 +492,8 @@ async function startSession() {
   // The baseline read (~0.3 s) runs alongside service startup rather than delaying it.
   const outputSession = outputWatch.start().catch(() => ({ mark() {} }));
   const markStep = (label) => { outputSession.then((s) => s.mark(label)); };
-  transition("STARTING");
-  setStatus("starting…");
+  transition("STARTING", { keepTranscript: Boolean(openedSessionId) });
+  setStatus(openedSessionId ? `continuing session ${openedSessionId}…` : "starting…");
 
   const profile = dom.profileInput.value.trim();
   const delay = Number(dom.delayInput.value) || 0;
@@ -511,6 +526,7 @@ async function startSession() {
       no_vad: noVad,
       publish_delay_seconds: delay,
       gpu_mem_budget_mb: gpuBudgetMb,
+      ...(openedSessionId ? { resume_session_id: openedSessionId } : {}),
     });
 
     let host = "127.0.0.1";
@@ -590,6 +606,54 @@ async function startSession() {
   }
 }
 
+// ── Session files (File menu) ─────────────────────────────────────────────────
+
+// Show a session read back from its folder (main process: lib/session_loader.js). Each
+// panel gets its own source's segments; saved corrections become their revisions, so
+// replay, further edits and Start (which continues the session) all work as live.
+function loadSession(payload) {
+  if (state.phase === "running" || state.phase === "starting" || state.phase === "stopping") {
+    setStatus("stop the running session before opening another", true);
+    return;
+  }
+  stopReplay();
+  transcript.clear();
+  for (const panel of Object.values(panels)) panel.clear();
+  const added = { mic: [], desktop: [] };
+  for (const { source, event } of payload.events || []) {
+    const lane = source === "desktop" ? "desktop" : "mic";
+    added[lane].push(...transcript.ingest(event, lane));
+  }
+  for (const [lane, records] of Object.entries(added)) panels[lane].append(records);
+  let applied = 0;
+  for (const correction of payload.corrections || []) {
+    const segmentId = (correction.segment_ids || [])[0];
+    const record = transcript.get(`${correction.session_id}/${correction.client_id}/${segmentId}`);
+    if (!record) continue;
+    transcript.applyCorrection(record, correction);
+    panels[record.source === "desktop" ? "desktop" : "mic"].refresh(record.key);
+    applied++;
+  }
+  openedSessionId = payload.sessionId;
+  showSession(payload.sessionId);
+  const edits = applied ? `, ${applied} edit${applied === 1 ? "" : "s"}` : "";
+  setStatus(`opened session ${payload.sessionId} (${transcript.size} segments${edits}). ` +
+    "Start adds to it; File → New Session starts a fresh one.");
+}
+
+function newSession() {
+  if (state.phase !== "idle") {
+    setStatus("stop the running session first", true);
+    return;
+  }
+  stopReplay();
+  transcript.clear();
+  for (const panel of Object.values(panels)) panel.clear();
+  openedSessionId = null;
+  showSession(null);
+  setStatus("idle");
+}
+
 // ── Stop session ──────────────────────────────────────────────────────────────
 
 async function stopSession() {
@@ -605,6 +669,9 @@ async function stopSession() {
   try { await CTRL.stop(BASE_URL); } catch (_) {}
 
   transition("STOPPED");
+  // The controller has written the session's files; a .what file the session was opened
+  // from (outside the logs folder) is refreshed by the main process.
+  if (shownSessionId && typeof CTRL.sessionStopped === "function") CTRL.sessionStopped(shownSessionId).catch(() => {});
   if (stopFailure) setStatus(`microphone stop failed: ${stopFailure.message || stopFailure}`, true);
   else setStatus("idle");
 }
@@ -911,6 +978,8 @@ async function init() {
   if (typeof CTRL.onTapSetupLog === "function") {
     CTRL.onTapSetupLog((line) => appendDebug("[tap-setup] " + line.replace(/\n$/, "")));
   }
+  if (typeof CTRL.onSessionLoaded === "function") CTRL.onSessionLoaded(loadSession);
+  if (typeof CTRL.onSessionNew === "function") CTRL.onSessionNew(newSession);
 
   startStatusPoll();
 }

@@ -223,3 +223,17 @@ def test_cli_pack_and_unpack_print_json(session, tmp_path):
     failed = run("unpack", str(tmp_path / "missing.what"))
     assert failed.returncode == 1
     assert json.loads(failed.stdout)["ok"] is False
+
+
+def test_pack_removes_old_leftovers_of_an_interrupted_pack(session):
+    import os
+    import time
+    stale = session / f".{SESSION}.what.abc123"
+    fresh = session / f".{SESSION}.what.def456"
+    for p in (stale, fresh):
+        p.write_bytes(b"partial")
+    old = time.time() - 2 * 3600
+    os.utime(stale, (old, old))
+    pack_session(session)
+    assert not stale.exists()
+    assert fresh.exists()  # may belong to a pack still running

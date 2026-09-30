@@ -49,7 +49,11 @@ const LEGACY_TEST_FILES = [
   "desktop_ipc_handlers.test.js",
   "ipc_registration_contract.test.js",
   "runtime_paths.test.js",
-  "python_runtime.test.js"
+  "python_runtime.test.js",
+  "session_loader.test.js",
+  "session_workspace.test.js",
+  "session_archive.test.js",
+  "app_menu.test.js"
 ];
 
 test("gui legacy test scripts pass", () => {

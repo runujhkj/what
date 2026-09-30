@@ -14,8 +14,12 @@ v0.1 is one application with the same feature set on macOS, Linux, and Windows:
 - A retained, scrollable transcript with **Return to live**.
 - Modifier-click a word to replay its recording; double-click a segment to correct it.
 - Browser captions for OBS, as a plain Browser source or the What Caption Box plugin.
+- A readable all-source transcript (`transcript.txt`) and a single session file
+  (`<session_id>.what`) for every run; **File → Open Session** reopens one to review, edit,
+  replay, or continue it.
 - Everything local: recordings, transcripts, and corrections stay on your machine
-  (`logs/<session_id>/` in a source checkout, `%APPDATA%\What\logs` for the Windows app).
+  (`logs/<session_id>/` in a source checkout; in the apps, `%APPDATA%\What\logs` on Windows,
+  `~/Library/Application Support/What/logs` on macOS, `~/.config/What/logs` on Linux).
 
 The workflow and UI are identical across platforms. What differs underneath is the speech
 engine and the desktop-audio backend, chosen automatically per platform (see the table
@@ -176,6 +180,28 @@ and desktop-audio permission prompts.
   switching is implemented with regression tests; hardware acceptance checks are still pending.
 - Desktop capture is suppressed during replay. Speaker playback can still reach a live mic.
 
+### Session files
+
+Each run writes two files into its session folder (**File → Show Session Folder**):
+
+- `transcript.txt`: everything that was said, from all sources, in time order. Each block
+  shows its time span and source (`Mic` or `Desktop`); review corrections are applied and
+  marked `(edited)`.
+- `<session_id>.what`: the whole session in one file (each source's recording and segment
+  log, corrections, transcript). It is written when the session stops and refreshed after
+  edits.
+
+**File → Open Session…** (Cmd/Ctrl+O) opens a `.what` file, also one copied from another
+machine. Mic and desktop go back into their own panels, with replay and editing as during a
+live session. Pressing **Start** then adds to that session. **File → New Session** clears
+the panels so the next Start begins a new one. **File → Save Session As…** writes the
+session to a `.what` file of your choice. A session opened from, or saved to, a file outside
+the logs folder keeps that file up to date as you edit or continue it.
+
+The same operations are available on the command line: `what session transcript <folder>`,
+`what session pack <folder>` and `what session unpack <file.what>`. See
+[session files](docs/SESSION_FILES.md) for the formats.
+
 ## OBS captions
 
 With `what` running, open [caption-box settings](http://127.0.0.1:8790/caption-box-settings).
@@ -199,9 +225,10 @@ The older `/overlay` page and native What Captions source remain available durin
 
 Session recordings, transcripts, and corrections are stored locally in `logs/<session_id>/`.
 Older correction exports use `corrections/`. Both directories are ignored by Git, along with
-local `.env` files, audio fixtures, and build outputs. Current-session history is retained;
-reopening old sessions in the GUI is not implemented. Corrections are saved with provenance
-but do not yet train a model or change already-published captions.
+local `.env` files, audio fixtures, and build outputs. A `.what` session file contains the
+session's audio recordings, so treat it like the recording itself when sharing it.
+Corrections are saved with provenance but do not yet train a model or change
+already-published captions.
 
 The normal GUI binds services to loopback. Do not expose controller or overlay ports to the
 public Internet; they are local desktop interfaces, not a hardened hosted service.

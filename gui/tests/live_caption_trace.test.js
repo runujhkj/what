@@ -259,6 +259,41 @@ const click = (el, target, props) => {
   click(elements.get("replayStopBtn"), elements.get("replayStopBtn"), {});
   await flush();
 
+  // File → Open Session: both panels are rebuilt from the saved events, corrections become
+  // the displayed revisions, Start keeps them (and resumes the session), New Session clears.
+  const contexts = [];
+  context.whatControl.setSessionContext = async (id) => { contexts.push(id); return { ok: true }; };
+  evaluate('transition("STOPPED")');
+  const savedSeg = (client, source, id, start, text) => ({
+    type: "segment", session_id: "2026-09-20_001_T090000", client_id: client, input_source_id: source,
+    recorded: true, segments: [{ id, abs_start: start, abs_end: start + 1, text }],
+  });
+  context.sessionPayload = {
+    sessionId: "2026-09-20_001_T090000",
+    events: [
+      { source: "mic", event: savedSeg("mic-a", "mic", "s1", 1, "Good morning.") },
+      { source: "desktop", event: savedSeg("desktop-b", "desktop", "s1", 2, "Welcome back.") },
+      { source: "mic", event: savedSeg("mic-a", "mic", "s2", 3, "Shall we start?") },
+    ],
+    corrections: [{
+      schema: "what.correction.v1", session_id: "2026-09-20_001_T090000", client_id: "mic-a",
+      segment_ids: ["s2"], revision: 1, corrected_text: "Shall we begin?", correction_id: "c1",
+      created_at: "2026-09-20T09:00:10.000Z",
+    }],
+  };
+  evaluate("loadSession(sessionPayload)");
+  assert.equal(elements.get("micTranscriptOut").textContent, "Good morning. Shall we begin?");
+  assert.equal(elements.get("desktopTranscriptOut").textContent, "Welcome back.");
+  assert.match(elements.get("statusLine").textContent, /opened session 2026-09-20_001_T090000 \(3 segments, 1 edit\)/);
+  assert.equal(evaluate("openedSessionId"), "2026-09-20_001_T090000");
+  assert.equal(contexts.at(-1), "2026-09-20_001_T090000");
+  evaluate('transition("STARTING", { keepTranscript: Boolean(openedSessionId) })');
+  assert.equal(elements.get("micTranscriptOut").textContent, "Good morning. Shall we begin?");
+  evaluate('transition("STOPPED"); newSession()');
+  assert.equal(evaluate("transcript.size"), 0);
+  assert.equal(evaluate("openedSessionId"), null);
+  assert.equal(contexts.at(-1), null);
+
   server.stop();
   console.log("live_caption_trace.test.js: default renderer → IPC → SSE → browser text passed");
 })().catch((err) => { console.error(err); process.exit(1); });

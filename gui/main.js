@@ -7,7 +7,7 @@ for (const stream of [process.stdout, process.stderr]) {
   if (stream && typeof stream.on === "function") stream.on("error", () => {});
 }
 const { stopProcess } = require("./lib/client_process_stop");
-const { app, BrowserWindow, ipcMain, dialog, shell, screen } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell, screen } = require("electron");
 // Keep settings, the GPU runtime and (packaged) logs under a stable "What" folder rather
 // than one named after the npm package. Must run before anything reads userData.
 {
@@ -50,6 +50,10 @@ const mainOverlayTestStreamRuntime = require("./lib/main_overlay_test_stream_run
 const mainTestStreamBridge = require("./lib/main_test_stream_bridge");
 const mainOverlayIngestGate = require("./lib/main_overlay_ingest_gate");
 const mainOverlayBroadcastRuntime = require("./lib/main_overlay_broadcast_runtime");
+const { buildMenuTemplate } = require("./lib/app_menu");
+const { createSessionArchive } = require("./lib/session_archive");
+const { loadSessionDir } = require("./lib/session_loader");
+const { createSessionWorkspace } = require("./lib/session_workspace");
 
 let mainWindow = null;
 let desktopAudioStubWindow = null;
@@ -76,6 +80,21 @@ const WHAT_PATHS = runtimePaths.computePaths({
   env: process.env,
 });
 const SERVICE_LOGS_DIR = WHAT_PATHS.logsDir;
+// File menu session commands (open/save .what files, show folder, new session).
+const sessionWorkspace = createSessionWorkspace({
+  dialog,
+  shell,
+  // Resolved per call: a packaged app sets WHAT_PYTHON only once it is ready.
+  getArchive: () => createSessionArchive({
+    spawn,
+    python: runtimePaths.resolvePython({ pythonRoot: WHAT_PATHS.pythonRoot, env: process.env }),
+    cwd: WHAT_PATHS.pythonRoot,
+  }),
+  loadSessionDir,
+  logsDir: SERVICE_LOGS_DIR,
+  getWindow: () => mainWindow,
+  isCapturing: () => [clientProc, desktopClientProc].some((p) => p && p.exitCode === null),
+});
 
 // Second client process for desktop tap audio, used when both mic and desktop are active.
 let desktopClientProc = null;
@@ -850,6 +869,10 @@ app.whenReady().then(() => {
   } catch (err) {
     reportStartupError("Preparing the runtime", err);
   }
+  Menu.setApplicationMenu(Menu.buildFromTemplate(buildMenuTemplate({
+    appName: app.getName(),
+    actions: sessionWorkspace,
+  })));
   if (String(process.env.WHAT_GUI_MODE || "").trim() === "desktop-audio-stub") {
     createDesktopAudioStubWindow();
   } else {
@@ -904,8 +927,10 @@ function _httpControllerStop(host, port) {
       (res) => { res.resume(); resolve(); }
     );
     req.on("error", resolve);
-    // stop_client + stop_service each wait up to 2s, so allow 6s total.
-    req.setTimeout(6000, () => { req.destroy(); resolve(); });
+    // stop_client + stop_service each wait up to 2s, then the controller writes the session's
+    // transcript and .what file (a few seconds for a long session). Killing the controller
+    // mid-write would leave no session file, so allow more than that.
+    req.setTimeout(30000, () => { req.destroy(); resolve(); });
     req.write("{}");
     req.end();
   });
@@ -945,6 +970,11 @@ app.on("before-quit", (event) => {
     const ctrlHost = "127.0.0.1";
     const ctrlPort = 8780;
     await _httpControllerStop(ctrlHost, ctrlPort);
+    // Write review edits that are still batched into the session's transcript and .what file.
+    await Promise.race([
+      sessionWorkspace.flush().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 5000)),
+    ]);
 
     // If we started the controller (packaged app), terminate it so it and its Whisper
     // service don't outlive the GUI.
@@ -1158,9 +1188,14 @@ ipcMain.handle("resolve-recording", (_event, opts) => {
   return result.ok ? { ...result, url: pathToFileURL(result.path).href } : result;
 });
 ipcMain.handle("audio-defaults", () => audioDefaults.readDefaultDevices());
-ipcMain.handle("save-session-correction", (_event, correction) =>
-  sessionCorrections.appendSessionCorrection({ logsDir: SERVICE_LOGS_DIR, correction })
-);
+ipcMain.handle("save-session-correction", (_event, correction) => {
+  const result = sessionCorrections.appendSessionCorrection({ logsDir: SERVICE_LOGS_DIR, correction });
+  // Keep transcript.txt and the session's .what file in step with review edits.
+  if (result.ok) sessionWorkspace.correctionSaved(correction.session_id);
+  return result;
+});
+ipcMain.handle("set-session-context", (_event, sessionId) => sessionWorkspace.setContext(sessionId));
+ipcMain.handle("session-stopped", (_event, sessionId) => sessionWorkspace.sessionStopped(sessionId));
 ipcMain.handle("set-review-playback", (_event, opts) =>
   reviewSuppressor.setActive(Boolean(opts && opts.active), opts && opts.maxMs)
 );
