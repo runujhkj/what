@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://what.local/schemas/caption_ops.schema.json",
+  "title": "CaptionOpsEnvelope",
+  "type": "object",
+  "required": ["type", "session_id", "seq", "ts_ms", "ops"],
+  "properties": {
+    "type": { "const": "caption_ops" },
+    "session_id": { "type": "string" },
+    "seq": { "type": "integer", "minimum": 1 },
+    "ts_ms": { "type": "integer", "minimum": 0 },
+    "ops": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["op", "line_id", "after_line_id", "reason", "segment_id"],
+            "properties": {
+              "op": { "const": "line_open" },
+              "line_id": { "type": "string" },
+              "after_line_id": { "type": "string" },
+              "reason": { "enum": ["manual", "gap", "width"] },
+              "segment_id": { "type": "string" },
+              "segment_start_ms": { "type": "integer", "minimum": 0 },
+              "segment_end_ms": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "required": ["op", "line_id", "text", "segment_id", "overflow_allowed"],
+            "properties": {
+              "op": { "const": "line_append" },
+              "line_id": { "type": "string" },
+              "text": { "type": "string" },
+              "segment_id": { "type": "string" },
+              "overflow_allowed": { "type": "boolean" }
+            },
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "required": ["op", "line_id"],
+            "properties": {
+              "op": { "const": "line_close" },
+              "line_id": { "type": "string" }
+            },
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "required": ["op", "line_id", "reason"],
+            "properties": {
+              "op": { "const": "line_evict" },
+              "line_id": { "type": "string" },
+              "reason": { "const": "max_lines" }
+            },
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "required": ["op", "line_id", "segment_id", "code", "message"],
+            "properties": {
+              "op": { "const": "warning" },
+              "line_id": { "type": "string" },
+              "segment_id": { "type": "string" },
+              "code": { "const": "line_overflow" },
+              "message": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        ]
+      }
+    }
+  },
+  "additionalProperties": true
+}
+

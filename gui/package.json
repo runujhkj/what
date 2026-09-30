@@ -1,0 +1,94 @@
+{
+  "name": "what-gui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local live transcription, OBS captions, and audio-linked transcript review",
+  "author": "what contributors",
+  "license": "GPL-3.0-or-later",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "prepare:pyruntime": "bash ../scripts/package/prepare_python_runtime.sh",
+    "dist:linux": "npm run prepare:pyruntime && electron-builder --linux AppImage",
+    "test": "node --test tests/all.node.test.js",
+    "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/package/build_windows.ps1"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.what.captions",
+    "productName": "What",
+    "artifactName": "what-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "**/*",
+      "!tests/**",
+      "!dist/**",
+      "!build/**",
+      "!installer/**"
+    ],
+    "extraResources": [
+      {
+        "from": "build/pyruntime",
+        "to": "pyruntime"
+      },
+      {
+        "from": "../LICENSE",
+        "to": "LICENSE.txt"
+      },
+      {
+        "from": "../THIRD_PARTY.md",
+        "to": "THIRD_PARTY.md"
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "AudioVideo",
+      "synopsis": "Local live transcription and OBS captions",
+      "icon": "icons/icon.png"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "build/python",
+          "to": "python"
+        },
+        {
+          "from": "build/bin",
+          "to": "bin"
+        },
+        {
+          "from": "build/obs-plugin",
+          "to": "obs-plugin"
+        }
+      ],
+      "icon": "icons/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "include": "installer/obs-plugin.nsh",
+      "artifactName": "what-${version}-${arch}-setup.${ext}",
+      "installerIcon": "icons/icon.ico",
+      "uninstallerIcon": "icons/icon.ico",
+      "shortcutName": "What"
+    }
+  }
+}

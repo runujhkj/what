@@ -1,0 +1,725 @@
+#!/usr/bin/env python3
+"""CoreAudio routing helper using what-coreaudio-aggregate backend."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import unicodedata
+from pathlib import Path
+
+RECEIPT_NAME = "desktop-audio-routing-receipt.json"
+AGGREGATE_HELPER_ENV = "WHAT_COREAUDIO_AGG_HELPER"
+
+
+def _is_mac() -> bool:
+    return sys.platform == "darwin"
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _find_aggregate_helper() -> str:
+    env = os.environ.get(AGGREGATE_HELPER_ENV, "").strip()
+    if env and Path(env).exists():
+        # Guard against accidental self-reference/misconfiguration.
+        name = Path(env).name
+        if name == "what-coreaudio-aggregate":
+            return env
+        env = ""
+    if env:
+        return ""
+    local = Path(__file__).resolve().parent / "what-coreaudio-aggregate"
+    if local.exists():
+        return str(local)
+    return ""
+
+
+def _run_aggregate_helper(args: list[str]) -> dict:
+    helper = _find_aggregate_helper()
+    if not helper:
+        return {"ok": False, "error": "missing_coreaudio_aggregate_helper"}
+    try:
+        result = subprocess.run([helper, *args], capture_output=True, text=True)
+    except Exception as exc:
+        return {"ok": False, "error": "aggregate_helper_exec_failed", "detail": str(exc)}
+    out = str(result.stdout or "").strip()
+    err = str(result.stderr or "").strip()
+    payload = {}
+    if out:
+        candidates = [out]
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        if lines:
+            candidates.append(lines[-1])
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    payload = parsed
+                    break
+            except Exception:
+                continue
+    if not payload:
+        payload = {
+            "ok": result.returncode == 0,
+            "error": "aggregate_helper_invalid_output",
+            "stdout": out,
+            "stderr": err,
+            "exit_code": int(result.returncode),
+        }
+    if payload.get("error") == "invalid_command":
+        payload["error"] = "aggregate_helper_misconfigured"
+        payload["detail"] = (
+            "Aggregate helper returned invalid_command. "
+            "Check WHAT_COREAUDIO_AGG_HELPER and ensure it points to what-coreaudio-aggregate."
+        )
+    return payload
+
+
+def _list_outputs() -> list[str]:
+    payload = _run_aggregate_helper(["list-outputs"])
+    outputs = payload.get("outputs") if isinstance(payload, dict) else None
+    if not isinstance(outputs, list):
+        return []
+    names: list[str] = []
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _list_output_rows() -> list[dict]:
+    payload = _run_aggregate_helper(["list-outputs"])
+    outputs = payload.get("outputs") if isinstance(payload, dict) else None
+    if not isinstance(outputs, list):
+        return []
+    rows: list[dict] = []
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        uid = str(item.get("uid") or "").strip()
+        if not name:
+            continue
+        rows.append({"name": name, "uid": uid})
+    return rows
+
+
+def _name_for_uid(rows: list[dict], uid: str) -> str:
+    target = str(uid or "").strip()
+    if not target:
+        return ""
+    for row in rows:
+        row_uid = str(row.get("uid") or "").strip()
+        if row_uid and row_uid == target:
+            return str(row.get("name") or "").strip()
+    return ""
+
+
+def _uid_for_name(rows: list[dict], name: str) -> str:
+    target = str(name or "").strip()
+    if not target:
+        return ""
+    for row in rows:
+        row_name = str(row.get("name") or "").strip()
+        if row_name and _same_device_name(row_name, target):
+            return str(row.get("uid") or "").strip()
+    return ""
+
+
+def _current_output() -> str:
+    payload = _run_aggregate_helper(["current-output"])
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return ""
+    return str(payload.get("name") or "").strip()
+
+
+def _set_output(name: str) -> dict:
+    return _run_aggregate_helper(["set-output", "--name", name])
+
+
+def _set_output_uid(uid: str) -> dict:
+    return _run_aggregate_helper(["set-output", "--uid", uid])
+
+
+def _is_managed_output_name(name: str, expected_name: str, fallback_pattern: str) -> bool:
+    text = _norm_name(name)
+    expected_norm = _norm_name(expected_name)
+    fallback_norm = _norm_name(fallback_pattern)
+    if not text:
+        return False
+    if expected_norm and text == expected_norm:
+        return True
+    if text.startswith("what-"):
+        return True
+    if fallback_norm and fallback_norm in text:
+        return True
+    return False
+
+
+def _norm_name(value: str) -> str:
+    text = str(value or "")
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("’", "'").replace("`", "'")
+    text = text.strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _compact_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _norm_name(value))
+
+
+def _same_device_name(a: str, b: str) -> bool:
+    an = _norm_name(a)
+    bn = _norm_name(b)
+    if not an or not bn:
+        return False
+    if an == bn:
+        return True
+    return _compact_name(an) == _compact_name(bn)
+
+
+def _name_contains(value: str, pattern: str) -> bool:
+    val = _norm_name(value)
+    pat = _norm_name(pattern)
+    if not val or not pat:
+        return False
+    if pat in val:
+        return True
+    return _compact_name(pat) in _compact_name(val)
+
+
+def _pick_non_managed_output(outputs: list[str], expected_name: str, fallback_pattern: str,
+                             preferred: str = "") -> str:
+    pref = str(preferred or "").strip()
+    if pref:
+        for name in outputs:
+            if _same_device_name(name, pref) and not _is_managed_output_name(name, expected_name, fallback_pattern):
+                return name
+    for name in outputs:
+        if not _is_managed_output_name(name, expected_name, fallback_pattern):
+            return name
+    return ""
+
+
+def _pick_non_managed_output_row(rows: list[dict], expected_name: str, fallback_pattern: str,
+                                 preferred_uid: str = "", preferred_name: str = "") -> dict:
+    pref_uid = str(preferred_uid or "").strip()
+    pref_name = str(preferred_name or "").strip()
+    if pref_uid:
+        for row in rows:
+            name = str(row.get("name") or "").strip()
+            uid = str(row.get("uid") or "").strip()
+            if not uid or uid != pref_uid:
+                continue
+            if _is_managed_output_name(name, expected_name, fallback_pattern):
+                continue
+            return {"name": name, "uid": uid}
+    if pref_name:
+        for row in rows:
+            name = str(row.get("name") or "").strip()
+            uid = str(row.get("uid") or "").strip()
+            if not _same_device_name(name, pref_name):
+                continue
+            if _is_managed_output_name(name, expected_name, fallback_pattern):
+                continue
+            return {"name": name, "uid": uid}
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        uid = str(row.get("uid") or "").strip()
+        if _is_managed_output_name(name, expected_name, fallback_pattern):
+            continue
+        return {"name": name, "uid": uid}
+    return {"name": "", "uid": ""}
+
+
+def _probe(state_dir: Path, expected_name: str, fallback_pattern: str) -> dict:
+    receipt = _read_json(state_dir / RECEIPT_NAME)
+    if not _is_mac():
+        return {
+            "ok": False,
+            "error": "unsupported_platform",
+            "routing": {
+                "backend": "coreaudio_aggregate",
+                "supported": False,
+                "enabled": True,
+                "can_route": False,
+                "can_restore": False,
+                "ready": False,
+                "name_expected": expected_name,
+                "blockers": ["unsupported_platform"],
+                "manual_steps": [],
+                "note": "macOS-only helper.",
+            },
+        }
+    helper = _find_aggregate_helper()
+    if not helper:
+        return {
+            "ok": False,
+            "error": "missing_coreaudio_aggregate_helper",
+            "routing": {
+                "backend": "coreaudio_aggregate",
+                "supported": True,
+                "enabled": True,
+                "can_route": False,
+                "can_restore": bool(receipt.get("previous_output")),
+                "ready": False,
+                "name_expected": expected_name,
+                "blockers": ["missing_coreaudio_aggregate_helper"],
+                "manual_steps": [
+                    "Install/provide what-coreaudio-aggregate helper and rerun setup.",
+                ],
+                "note": "CoreAudio aggregate helper not found.",
+            },
+        }
+    rows = _list_output_rows()
+    outputs = [str(row.get("name") or "").strip() for row in rows if str(row.get("name") or "").strip()]
+    current = _current_output()
+    current_uid = _uid_for_name(rows, current)
+    target = ""
+    target_uid = ""
+    has_fallback = False
+    resolver_notes: list[str] = []
+    for name in outputs:
+        if _name_contains(name, fallback_pattern):
+            has_fallback = True
+            resolver_notes.append(f"fallback_detected:{name}")
+            continue
+        if _same_device_name(name, expected_name):
+            target = name
+            target_uid = _uid_for_name(rows, target)
+            resolver_notes.append(f"target_expected_match:{name}")
+            break
+    if not target:
+        # Accept legacy/manual aliases (e.g. "what-d") as managed target class.
+        for name in outputs:
+            if _norm_name(name).startswith("what-"):
+                target = name
+                target_uid = _uid_for_name(rows, target)
+                resolver_notes.append(f"target_legacy_match:{name}")
+                break
+    if not target and _is_managed_output_name(current, expected_name, fallback_pattern):
+        target = current
+        target_uid = current_uid
+        resolver_notes.append(f"target_current_managed:{current}")
+    ready = bool(target and current and _same_device_name(target, current))
+    target_is_expected = bool(
+        target and (
+            _same_device_name(target, expected_name)
+            or _norm_name(target).startswith("what-")
+        )
+    )
+    blockers = []
+    manual_steps: list[str] = []
+    note = ""
+    if not target:
+        blockers.append("missing_target_output")
+        if has_fallback:
+            note = "what-desktop aggregate missing; loopback-only target found but not allowed for desktop capture."
+        else:
+            note = "No routable target output found."
+        manual_steps = [
+            "Create a Multi-Output Device named 'what-desktop' in Audio MIDI Setup (include BlackHole + listening device).",
+        ]
+    elif target and target.lower() != expected_name.lower():
+        note = f"Using legacy what-* target ({target}); optional: recreate as '{expected_name}' for consistency."
+    return {
+        "ok": True,
+        "routing": {
+            "backend": "coreaudio_aggregate",
+            "supported": True,
+            "enabled": True,
+            "can_route": True,
+            "can_restore": bool(receipt.get("previous_output")),
+            "ready": ready,
+            "name_expected": expected_name,
+            "manager": "coreaudio_aggregate",
+            "manager_path": helper,
+            "current_output": current,
+            "current_output_uid": current_uid,
+            "target_output": target,
+            "target_output_uid": target_uid,
+            "target_is_expected": target_is_expected,
+            "blockers": blockers,
+            "manual_steps": manual_steps,
+            "note": note,
+            "resolver": {
+                "expected_name": expected_name,
+                "expected_name_norm": _norm_name(expected_name),
+                "fallback_pattern": fallback_pattern,
+                "fallback_pattern_norm": _norm_name(fallback_pattern),
+                "current_output_norm": _norm_name(current),
+                "outputs_n": len(outputs),
+                "outputs": outputs[:40],
+                "output_rows": rows[:40],
+                "selected_output": str(receipt.get("selected_output") or ""),
+                "selected_output_uid": str(receipt.get("selected_output_uid") or ""),
+                "passthrough_output": str(receipt.get("passthrough_output") or ""),
+                "passthrough_output_uid": str(receipt.get("passthrough_output_uid") or ""),
+                "notes": resolver_notes,
+            },
+        },
+    }
+
+
+def _ensure(state_dir: Path, expected_name: str, fallback_pattern: str) -> dict:
+    probe = _probe(state_dir, expected_name, fallback_pattern)
+    routing = probe.get("routing", {})
+    if not probe.get("ok"):
+        return probe
+    if routing.get("ready"):
+        return {"ok": True, "changed": False, "routing": routing}
+    target = str(routing.get("target_output") or "")
+    target_uid = str(routing.get("target_output_uid") or "").strip()
+    target_is_expected = bool(routing.get("target_is_expected", False))
+    selection_reason = "existing_target"
+    selected_output_uid = ""
+    selected_output_name = ""
+    passthrough_output_uid = ""
+    passthrough_output_name = ""
+    if (not target) or (target and not target_is_expected):
+        rows = _list_output_rows()
+        outputs = [str(row.get("name") or "").strip() for row in rows if str(row.get("name") or "").strip()]
+        loopback_name = ""
+        loopback_uid = ""
+        listening_name = ""
+        listening_uid = ""
+        receipt = _read_json(state_dir / RECEIPT_NAME)
+        preferred_output = str(receipt.get("selected_output") or "").strip()
+        preferred_output_uid = str(receipt.get("selected_output_uid") or "").strip()
+        previous_output_uid = str(receipt.get("previous_output_uid") or "").strip()
+        previous_output = str(receipt.get("previous_output") or "").strip()
+        for name in outputs:
+            if _name_contains(name, fallback_pattern):
+                loopback_name = name
+                loopback_uid = _uid_for_name(rows, name)
+                break
+        if preferred_output_uid:
+            for row in rows:
+                uid = str(row.get("uid") or "").strip()
+                name = str(row.get("name") or "").strip()
+                if uid != preferred_output_uid:
+                    continue
+                if _name_contains(name, fallback_pattern):
+                    continue
+                if _is_managed_output_name(name, expected_name, fallback_pattern):
+                    continue
+                listening_name = name
+                listening_uid = uid
+                selection_reason = "preferred_uid"
+                break
+        if (not listening_name) and preferred_output:
+            for name in outputs:
+                if not _same_device_name(name, preferred_output):
+                    continue
+                if _name_contains(name, fallback_pattern):
+                    continue
+                if _is_managed_output_name(name, expected_name, fallback_pattern):
+                    continue
+                listening_name = name
+                listening_uid = _uid_for_name(rows, name)
+                selection_reason = "preferred_name"
+                break
+        if (not listening_name) and previous_output_uid:
+            for row in rows:
+                uid = str(row.get("uid") or "").strip()
+                name = str(row.get("name") or "").strip()
+                if uid != previous_output_uid:
+                    continue
+                if _name_contains(name, fallback_pattern):
+                    continue
+                if _is_managed_output_name(name, expected_name, fallback_pattern):
+                    continue
+                listening_name = name
+                listening_uid = uid
+                selection_reason = "previous_uid"
+                break
+        if not listening_name and previous_output:
+            for name in outputs:
+                if not _same_device_name(name, previous_output):
+                    continue
+                if _name_contains(name, fallback_pattern):
+                    continue
+                if _is_managed_output_name(name, expected_name, fallback_pattern):
+                    continue
+                listening_name = name
+                listening_uid = _uid_for_name(rows, name)
+                selection_reason = "previous_name"
+                break
+        cur = str(routing.get("current_output") or "")
+        if (not listening_name) and cur and (not _is_managed_output_name(cur, expected_name, fallback_pattern)):
+            listening_name = cur
+            listening_uid = _uid_for_name(rows, cur)
+            selection_reason = "current_output"
+        if not listening_name:
+            picked = _pick_non_managed_output_row(
+                rows,
+                expected_name,
+                fallback_pattern,
+                preferred_uid=preferred_output_uid or previous_output_uid,
+                preferred_name=preferred_output or previous_output,
+            )
+            listening_name = str(picked.get("name") or "").strip()
+            listening_uid = str(picked.get("uid") or "").strip()
+            selection_reason = "first_non_managed_output"
+        if not loopback_name or not listening_name:
+            return {"ok": False, "error": "missing_target_output", "routing": routing}
+        if loopback_name and listening_name:
+            aggregate_uid = f"what.desktop.{int(time.time())}"
+            created = _run_aggregate_helper(
+                [
+                    "create",
+                    "--name",
+                    expected_name,
+                    "--uid",
+                    aggregate_uid,
+                    "--output-name",
+                    listening_name,
+                    "--loopback-name",
+                    loopback_name,
+                ]
+            )
+            if created.get("ok"):
+                probe = _probe(state_dir, expected_name, fallback_pattern)
+                routing = probe.get("routing", {})
+                target = str(routing.get("target_output") or "")
+                target_uid = str(routing.get("target_output_uid") or "").strip()
+                target_is_expected = bool(routing.get("target_is_expected", False))
+                if (not target) or (not target_is_expected):
+                    return {
+                        "ok": False,
+                        "error": "expected_target_not_ready",
+                        "routing": routing,
+                        "aggregate": created,
+                    }
+                pending_aggregate_uid = str(created.get("device_uid") or aggregate_uid)
+                selected_output_uid = listening_uid
+                selected_output_name = listening_name
+                passthrough_output_uid = listening_uid
+                passthrough_output_name = listening_name
+            else:
+                enriched = dict(routing)
+                steps = list(enriched.get("manual_steps", []))
+                steps.append("Automatic what-desktop creation failed; create it manually in Audio MIDI Setup.")
+                enriched["manual_steps"] = steps
+                return {
+                    "ok": False,
+                    "error": str(created.get("error", "aggregate_create_failed")),
+                    "routing": enriched,
+                    "aggregate": created,
+                }
+        else:
+            pending_aggregate_uid = ""
+    else:
+        pending_aggregate_uid = ""
+
+    current = str(routing.get("current_output") or "")
+    current_uid = str(routing.get("current_output_uid") or "").strip()
+    if target_uid:
+        set_result = _set_output_uid(target_uid)
+    else:
+        set_result = _set_output(target)
+    if not set_result.get("ok"):
+        return {
+            "ok": False,
+            "error": "route_failed",
+            "code": int(set_result.get("status", 1)),
+            "stdout": str(set_result.get("stdout", "")),
+            "stderr": str(set_result.get("stderr", "")),
+            "routing": _probe(state_dir, expected_name, fallback_pattern).get("routing", {}),
+        }
+    receipt = _read_json(state_dir / RECEIPT_NAME)
+    previous_output = current
+    previous_output_uid = current_uid
+    if _is_managed_output_name(previous_output, expected_name, fallback_pattern):
+        previous_output = str(receipt.get("previous_output") or "").strip()
+        previous_output_uid = str(receipt.get("previous_output_uid") or "").strip()
+    if _is_managed_output_name(previous_output, expected_name, fallback_pattern):
+        previous_output = str(receipt.get("selected_output") or "").strip()
+        previous_output_uid = str(receipt.get("selected_output_uid") or "").strip()
+    if _is_managed_output_name(previous_output, expected_name, fallback_pattern):
+        previous_output = str(locals().get("listening_name") or "").strip()
+        previous_output_uid = str(locals().get("listening_uid") or "").strip()
+    if _is_managed_output_name(previous_output, expected_name, fallback_pattern):
+        previous_output = ""
+        previous_output_uid = ""
+
+    if not selected_output_name:
+        selected_output_name = str(receipt.get("selected_output") or "").strip()
+    if not selected_output_uid:
+        selected_output_uid = str(receipt.get("selected_output_uid") or "").strip()
+    if not passthrough_output_name:
+        passthrough_output_name = str(receipt.get("passthrough_output") or "").strip() or selected_output_name
+    if not passthrough_output_uid:
+        passthrough_output_uid = str(receipt.get("passthrough_output_uid") or "").strip() or selected_output_uid
+
+    _write_json(
+        state_dir / RECEIPT_NAME,
+        {
+            "version": 1,
+            "backend": "coreaudio_aggregate",
+            "mode": "output_switch",
+            "previous_output": previous_output,
+            "previous_output_uid": previous_output_uid,
+            "routed_output": target,
+            "routed_output_uid": target_uid,
+            "selected_output": selected_output_name,
+            "selected_output_uid": selected_output_uid,
+            "passthrough_output": passthrough_output_name,
+            "passthrough_output_uid": passthrough_output_uid,
+            "selection_reason": selection_reason,
+            "aggregate_uid": pending_aggregate_uid,
+            "applied_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        },
+    )
+    return {
+        "ok": True,
+        "changed": True,
+        "routing": _probe(state_dir, expected_name, fallback_pattern).get("routing", {}),
+    }
+
+
+def _restore(state_dir: Path, expected_name: str, fallback_pattern: str) -> dict:
+    probe = _probe(state_dir, expected_name, fallback_pattern)
+    routing = probe.get("routing", {})
+    receipt_path = state_dir / RECEIPT_NAME
+    receipt = _read_json(receipt_path)
+    prev = str(receipt.get("previous_output") or "").strip()
+    prev_uid = str(receipt.get("previous_output_uid") or "").strip()
+    if _is_managed_output_name(prev, expected_name, fallback_pattern):
+        prev = ""
+        prev_uid = ""
+    if not prev:
+        rows = _list_output_rows()
+        outputs = [str(row.get("name") or "").strip() for row in rows if str(row.get("name") or "").strip()]
+        picked = _pick_non_managed_output_row(
+            rows,
+            expected_name,
+            fallback_pattern,
+            preferred_uid=str(receipt.get("selected_output_uid") or "").strip(),
+            preferred_name=str(receipt.get("selected_output") or "").strip(),
+        )
+        prev = str(picked.get("name") or "").strip()
+        prev_uid = str(picked.get("uid") or "").strip()
+    if not prev:
+        try:
+            receipt_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return {"ok": True, "changed": False, "routing": routing}
+    result = _set_output_uid(prev_uid) if prev_uid else _set_output(prev)
+    if not result.get("ok"):
+        return {
+            "ok": False,
+            "error": "restore_failed",
+            "code": int(result.get("status", 1)),
+            "stdout": str(result.get("stdout", "")),
+            "stderr": str(result.get("stderr", "")),
+            "routing": _probe(state_dir, expected_name, fallback_pattern).get("routing", {}),
+        }
+    try:
+        receipt_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "changed": True,
+        "routing": _probe(state_dir, expected_name, fallback_pattern).get("routing", {}),
+    }
+
+
+def _remove_managed(state_dir: Path, expected_name: str, fallback_pattern: str) -> dict:
+    receipt_path = state_dir / RECEIPT_NAME
+    receipt = _read_json(receipt_path)
+    aggregate_uid = str(receipt.get("aggregate_uid") or "").strip()
+    if not aggregate_uid:
+        listed = _run_aggregate_helper(["list-outputs"])
+        outputs = listed.get("outputs") if isinstance(listed, dict) else None
+        if isinstance(outputs, list):
+            for item in outputs:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                uid = str(item.get("uid") or "").strip()
+                if name.lower() == expected_name.lower() and uid:
+                    aggregate_uid = uid
+                    break
+    restore = _restore(state_dir, expected_name, fallback_pattern)
+    if aggregate_uid:
+        destroyed = _run_aggregate_helper(["destroy", "--uid", aggregate_uid])
+        if not destroyed.get("ok"):
+            if restore.get("ok"):
+                restore["ok"] = False
+                restore["error"] = str(destroyed.get("error", "aggregate_destroy_failed"))
+            restore["aggregate"] = destroyed
+    post = _probe(state_dir, expected_name, fallback_pattern).get("routing", {})
+    post_current = str(post.get("current_output") or "").strip()
+    if _is_managed_output_name(post_current, expected_name, fallback_pattern):
+        rows = _list_output_rows()
+        picked = _pick_non_managed_output_row(
+            rows,
+            expected_name,
+            fallback_pattern,
+            preferred_uid=str(receipt.get("selected_output_uid") or "").strip(),
+            preferred_name=str(receipt.get("selected_output") or "").strip(),
+        )
+        fallback_target = str(picked.get("name") or "").strip()
+        fallback_uid = str(picked.get("uid") or "").strip()
+        if fallback_target:
+            set_back = _set_output_uid(fallback_uid) if fallback_uid else _set_output(fallback_target)
+            if not set_back.get("ok") and restore.get("ok"):
+                restore["ok"] = False
+                restore["error"] = "restore_failed"
+                restore["stderr"] = str(set_back.get("stderr", ""))
+                restore["stdout"] = str(set_back.get("stdout", ""))
+    try:
+        receipt_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return restore
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=["probe", "ensure", "restore", "remove-managed"])
+    parser.add_argument("--state-dir", required=True)
+    parser.add_argument("--name", default="what-desktop")
+    parser.add_argument("--fallback-pattern", default="blackhole")
+    args = parser.parse_args()
+
+    state_dir = Path(args.state_dir).expanduser()
+    if args.command == "probe":
+        payload = _probe(state_dir, args.name, args.fallback_pattern)
+    elif args.command == "ensure":
+        payload = _ensure(state_dir, args.name, args.fallback_pattern)
+    elif args.command == "restore":
+        payload = _restore(state_dir, args.name, args.fallback_pattern)
+    elif args.command == "remove-managed":
+        payload = _remove_managed(state_dir, args.name, args.fallback_pattern)
+    else:
+        payload = {"ok": False, "error": "invalid_command"}
+    print(json.dumps(payload, sort_keys=True))
+    return 0 if payload.get("ok") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

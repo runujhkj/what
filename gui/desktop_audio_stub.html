@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>what desktop audio stub</title>
+    <style>
+      body { margin: 0; padding: 14px; background: #0f131a; color: #e6ebf2; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      button { border: 1px solid #3a4353; background: #1e2633; color: #e6ebf2; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+      button:hover { background: #2a3445; }
+      .primary { background: #1d4ed8; border-color: #1d4ed8; }
+      .status { margin-top: 10px; background: #111827; border: 1px solid #2f3b4d; border-radius: 8px; padding: 10px; white-space: pre-wrap; min-height: 190px; font-size: 12px; line-height: 1.35; }
+      .transcript { margin-top: 10px; background: #0b1018; border: 1px solid #2f3b4d; border-radius: 8px; padding: 10px; white-space: pre-wrap; min-height: 180px; font-size: 12px; line-height: 1.35; overflow: auto; }
+      .level-wrap { margin-top: 10px; }
+      .level-label { color: #a0a8b8; font-size: 12px; margin-bottom: 4px; }
+      .level-meter { height: 10px; border-radius: 999px; border: 1px solid #2f3b4d; background: #0b1018; overflow: hidden; }
+      .level-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #22c55e, #eab308 68%, #ef4444); transition: width 120ms linear; }
+      input { width: 100%; margin-top: 8px; box-sizing: border-box; border: 1px solid #3a4353; border-radius: 6px; background: #0b1018; color: #e6ebf2; padding: 8px; }
+      .hint { color: #a0a8b8; font-size: 12px; margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <button id="refreshBtn" class="primary">Refresh</button>
+      <button id="installBtn">Install</button>
+      <button id="installDriverOnlyBtn">Install (Driver Only)</button>
+      <button id="uninstallBtn">Uninstall</button>
+      <button id="pingBtn">Ping/Test</button>
+      <button id="startTranscriptBtn">Start Transcript</button>
+      <button id="stopTranscriptBtn">Stop Transcript</button>
+      <button id="closeBtn">Close</button>
+    </div>
+    <input id="baseUrl" value="http://127.0.0.1:8780" />
+    <div class="hint">Controller API endpoint used by this stub.</div>
+    <div class="level-wrap">
+      <div id="levelLabel" class="level-label">Desktop level: unknown</div>
+      <div class="level-meter"><div id="levelFill" class="level-fill"></div></div>
+    </div>
+    <div id="statusOut" class="status">loading...</div>
+    <div id="transcriptOut" class="transcript">(desktop transcript will appear here)</div>
+    <script>
+      const baseUrlEl = document.getElementById("baseUrl");
+      const statusOut = document.getElementById("statusOut");
+      const transcriptOut = document.getElementById("transcriptOut");
+      const levelLabel = document.getElementById("levelLabel");
+      const levelFill = document.getElementById("levelFill");
+      const refreshBtn = document.getElementById("refreshBtn");
+      const installBtn = document.getElementById("installBtn");
+      const installDriverOnlyBtn = document.getElementById("installDriverOnlyBtn");
+      const uninstallBtn = document.getElementById("uninstallBtn");
+      const pingBtn = document.getElementById("pingBtn");
+      const startTranscriptBtn = document.getElementById("startTranscriptBtn");
+      const stopTranscriptBtn = document.getElementById("stopTranscriptBtn");
+      const closeBtn = document.getElementById("closeBtn");
+      let busy = false;
+      let refreshInFlight = false;
+      let canInstall = false;
+      let canUninstall = false;
+      let streamRunning = false;
+      let streamOffset = 0;
+      let lastStreamSeq = 0;
+      let transcriptLines = [];
+      let lastRoutingSnapshot = {};
+      let helperCaptureState = "";
+      let helperChunksSent = 0;
+      let lastStreamAdvanceAtMs = Date.now();
+      let helperChunksAtLastAdvance = 0;
+      let lastTranscriptAppendAtMs = 0;
+      let stallRecoveryAttempts = 0;
+      let stallRecoveryInFlight = false;
+      let lastStallRecoveryAtMs = 0;
+      let seenSegmentIds = new Set();
+      let seenSegmentOrder = [];
+      let fallbackTailText = "";
+      let lastEventSessionKey = "";
+      let lagTelemetry = {
+        lagSec: 0,
+        droppedStale: 0,
+        droppedSubchunk: 0,
+        droppedDynamic: 0,
+        decodeRatioAvg: 0,
+        updatedAtMs: 0,
+      };
+      const MAX_SEEN_SEGMENTS = 4000;
+      const STALL_RECOVERY_AFTER_MS = 12000;
+      const STALL_RECOVERY_COOLDOWN_MS = 45000;
+      const STALL_MIN_CHUNKS_DELTA = 80;
+
+      function baseUrl() { return (baseUrlEl && baseUrlEl.value ? baseUrlEl.value : "http://127.0.0.1:8780").trim(); }
+      function setBusy(next) {
+        busy = Boolean(next);
+        refreshBtn.disabled = busy;
+        installBtn.disabled = busy || !canInstall;
+        installDriverOnlyBtn.disabled = busy || !canInstall;
+        uninstallBtn.disabled = busy || !canUninstall;
+        pingBtn.disabled = busy;
+        startTranscriptBtn.disabled = busy || streamRunning;
+        stopTranscriptBtn.disabled = busy || !streamRunning;
+      }
+      async function log(msg) {
+        try {
+          if (window.whatControl && window.whatControl.sessionLog) {
+            await window.whatControl.sessionLog(baseUrl(), `desktop stub: ${String(msg || "")}`);
+          }
+        } catch (_err) {}
+      }
+
+      function setLevel(statusText, percent) {
+        levelLabel.textContent = `Desktop level: ${statusText}`;
+        const width = Math.max(0, Math.min(100, Number(percent || 0)));
+        levelFill.style.width = `${width}%`;
+      }
+
+      function parseLevelInfo(controlStatusPayload) {
+        const manager = controlStatusPayload && controlStatusPayload.desktop_native_helper_manager
+          ? controlStatusPayload.desktop_native_helper_manager
+          : {};
+        const health = manager && manager.health_payload && typeof manager.health_payload === "object"
+          ? manager.health_payload
+          : {};
+        const captureState = String(health.capture_state || "").trim().toLowerCase();
+        const levelRaw = health.last_rms ?? health.rms ?? health.level ?? health.peak_level;
+        const levelNum = Number(levelRaw);
+        const levelFinite = Number.isFinite(levelNum) ? levelNum : -1;
+        const chunks = Number(health.chunks_sent || 0);
+        if (levelFinite > 0) {
+          // Helper reports raw PCM RMS (0..32767). Normalize and apply a mild
+          // sqrt curve so ordinary desktop audio doesn't peg at 100%.
+          const normalized = Math.max(0, Math.min(1, levelFinite / 32767));
+          const curved = Math.sqrt(normalized);
+          const percent = Math.min(100, Math.max(1, Math.round(curved * 100)));
+          return { text: `signal (${levelFinite.toFixed(0)} rms)`, percent, captureState, chunks };
+        }
+        if (captureState === "signal" || chunks > 0) {
+          return { text: "signal (low)", percent: 8, captureState, chunks };
+        }
+        if (captureState) {
+          return { text: captureState, percent: 0, captureState, chunks };
+        }
+        return { text: "unknown", percent: 0, captureState, chunks };
+      }
+
+      function effectiveLagSec() {
+        const base = Number(lagTelemetry.lagSec || 0);
+        if (!streamRunning) return Math.max(0, base);
+        const updatedAt = Number(lagTelemetry.updatedAtMs || 0);
+        if (!Number.isFinite(updatedAt) || updatedAt <= 0) return Math.max(0, base);
+        const ageSec = Math.max(0, (Date.now() - updatedAt) / 1000);
+        return Math.max(0, base + ageSec);
+      }
+
+      function render(statusPayload, controlStatusPayload) {
+        const status = statusPayload && statusPayload.status ? statusPayload.status : {};
+        const routingFromStatus = status && status.routing && typeof status.routing === "object"
+          ? status.routing
+          : null;
+        if (routingFromStatus && Object.keys(routingFromStatus).length > 0) {
+          lastRoutingSnapshot = routingFromStatus;
+        }
+        const routing = routingFromStatus || lastRoutingSnapshot || {};
+        const control = controlStatusPayload && typeof controlStatusPayload === "object" ? controlStatusPayload : {};
+        streamRunning = Boolean(control.stream_running) && Boolean(control.stream_desktop_enabled);
+        const levelInfo = parseLevelInfo(controlStatusPayload || {});
+        helperCaptureState = String(levelInfo.captureState || "");
+        helperChunksSent = Number(levelInfo.chunks || 0);
+        setLevel(levelInfo.text, levelInfo.percent);
+        const lines = [
+          `supported: ${status.supported ? "yes" : "no"}`,
+          `installed: ${status.installed ? "yes" : "no"}`,
+          `managed_install: ${status.managed_install ? "yes" : "no"}`,
+          `can_auto_install: ${status.can_auto_install ? "yes" : "no"}`,
+          `can_auto_uninstall: ${status.can_auto_uninstall ? "yes" : "no"}`,
+          `install_pkg_path: ${status.install_pkg_path || "-"}`,
+          `installed_drivers: ${(status.installed_drivers || []).join(", ") || "-"}`,
+          `managed_drivers: ${(status.managed_drivers || []).join(", ") || "-"}`,
+          `routing.backend: ${routing.backend || "-"}`,
+          `routing.enabled: ${routing.enabled ? "yes" : "no"}`,
+          `routing.ready: ${routing.ready ? "yes" : "no"}`,
+          `routing.target: ${routing.target_output || "-"}`,
+          `routing.current: ${routing.current_output || "-"}`,
+          `routing.blockers: ${(routing.blockers || []).join(", ") || "-"}`,
+          `routing.manual_steps: ${(routing.manual_steps || []).join(" | ") || "-"}`,
+          `routing.note: ${routing.note || "-"}`,
+          `helper.capture_state: ${levelInfo.captureState || "-"}`,
+          `helper.chunks_sent: ${levelInfo.chunks}`,
+          `stream.running: ${streamRunning ? "yes" : "no"}`,
+          `lag.sec: ${Number(effectiveLagSec() || 0).toFixed(2)}`,
+          `lag.decode_ratio_avg: ${Number(lagTelemetry.decodeRatioAvg || 0).toFixed(3)}`,
+          `lag.drop_stale: ${Number(lagTelemetry.droppedStale || 0)}`,
+          `lag.drop_subchunk: ${Number(lagTelemetry.droppedSubchunk || 0)}`,
+          `lag.drop_dynamic: ${Number(lagTelemetry.droppedDynamic || 0)}`,
+          `note: ${status.note || "-"}`,
+        ];
+        statusOut.textContent = lines.join("\n");
+        canInstall = !!status.can_auto_install && !status.managed_install;
+        canUninstall = !!status.can_auto_uninstall;
+        setBusy(busy);
+      }
+
+      function renderTranscript() {
+        if (!transcriptLines.length) {
+          transcriptOut.textContent = "(desktop transcript will appear here)";
+          return;
+        }
+        transcriptOut.textContent = transcriptLines.join("\n");
+        transcriptOut.scrollTop = transcriptOut.scrollHeight;
+      }
+
+      function parseEventLine(raw) {
+        const line = String(raw || "");
+        const marker = "EVENT:";
+        const idx = line.indexOf(marker);
+        if (idx < 0) return null;
+        const body = line.slice(idx + marker.length).trim();
+        if (!body) return null;
+        try {
+          return JSON.parse(body);
+        } catch (_err) {
+          return null;
+        }
+      }
+
+      function normalizeToken(token) {
+        return String(token || "")
+          .toLowerCase()
+          .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "")
+          .trim();
+      }
+
+      function overlapDelta(nextTextRaw, previousTextRaw) {
+        const nextRawTokens = String(nextTextRaw || "").trim().split(/\s+/).filter(Boolean);
+        const prevRawTokens = String(previousTextRaw || "").trim().split(/\s+/).filter(Boolean);
+        if (!nextRawTokens.length) return "";
+        if (!prevRawTokens.length) return nextRawTokens.join(" ").trim();
+        const nextNorm = nextRawTokens.map(normalizeToken);
+        const prevNorm = prevRawTokens.map(normalizeToken);
+        const maxK = Math.min(prevNorm.length, nextNorm.length);
+        let overlap = 0;
+        for (let k = maxK; k > 0; k -= 1) {
+          let ok = true;
+          for (let i = 0; i < k; i += 1) {
+            if (prevNorm[prevNorm.length - k + i] !== nextNorm[i]) {
+              ok = false;
+              break;
+            }
+          }
+          if (ok) {
+            overlap = k;
+            break;
+          }
+        }
+        return nextRawTokens.slice(overlap).join(" ").trim();
+      }
+
+      function rememberSeenSegmentId(id) {
+        const key = String(id || "").trim();
+        if (!key || seenSegmentIds.has(key)) return false;
+        seenSegmentIds.add(key);
+        seenSegmentOrder.push(key);
+        if (seenSegmentOrder.length > MAX_SEEN_SEGMENTS) {
+          const drop = seenSegmentOrder.shift();
+          if (drop) seenSegmentIds.delete(drop);
+        }
+        return true;
+      }
+
+      function clearTranscriptDedupeState() {
+        seenSegmentIds = new Set();
+        seenSegmentOrder = [];
+        fallbackTailText = "";
+        lastStreamSeq = 0;
+      }
+
+      function appendTranscriptLine(text) {
+        const line = String(text || "").trim();
+        if (!line) return false;
+        transcriptLines.push(line);
+        if (transcriptLines.length > 250) {
+          transcriptLines = transcriptLines.slice(transcriptLines.length - 250);
+        }
+        return true;
+      }
+
+      function handleEvent(eventObj) {
+        if (!eventObj || typeof eventObj !== "object") return;
+        const sessionKey = `${String(eventObj.session_id || "")}:${String(eventObj.client_id || "")}`;
+        if (sessionKey && sessionKey !== ":" && sessionKey !== lastEventSessionKey) {
+          lastEventSessionKey = sessionKey;
+          clearTranscriptDedupeState();
+          renderTranscript();
+        }
+        const lag = eventObj.lag && typeof eventObj.lag === "object" ? eventObj.lag : null;
+        if (lag) {
+          if (Number.isFinite(Number(lag.processing_lag_sec))) lagTelemetry.lagSec = Number(lag.processing_lag_sec);
+          if (Number.isFinite(Number(lag.decode_audio_ratio_avg))) lagTelemetry.decodeRatioAvg = Number(lag.decode_audio_ratio_avg);
+          if (Number.isFinite(Number(lag.dropped_stale_total))) lagTelemetry.droppedStale = Number(lag.dropped_stale_total);
+          if (Number.isFinite(Number(lag.dropped_subchunk_total))) lagTelemetry.droppedSubchunk = Number(lag.dropped_subchunk_total);
+          if (Number.isFinite(Number(lag.dropped_dynamic_total))) lagTelemetry.droppedDynamic = Number(lag.dropped_dynamic_total);
+          lagTelemetry.updatedAtMs = Date.now();
+        }
+        if (String(eventObj.type || "") !== "segment") return;
+        let appended = false;
+        const segments = Array.isArray(eventObj.segments) ? eventObj.segments : [];
+        for (const seg of segments) {
+          if (!seg || typeof seg !== "object") continue;
+          const segId = String(seg.id || "").trim();
+          const segText = String(seg.text || "").trim();
+          if (!segText) continue;
+          if (segId && !rememberSeenSegmentId(segId)) continue;
+          if (appendTranscriptLine(segText)) {
+            fallbackTailText = segText;
+            appended = true;
+          }
+        }
+        if (!appended) {
+          const whole = String(eventObj.text || "").trim();
+          if (whole) {
+            const delta = overlapDelta(whole, fallbackTailText);
+            if (delta && appendTranscriptLine(delta)) {
+              fallbackTailText = whole;
+              appended = true;
+            }
+          }
+        }
+        if (appended) renderTranscript();
+        if (appended) lastTranscriptAppendAtMs = Date.now();
+      }
+
+      async function tryRecoverFromEventStall(reason) {
+        if (!streamRunning) return;
+        if (stallRecoveryInFlight) return;
+        const now = Date.now();
+        if (stallRecoveryAttempts >= 1) return;
+        if ((now - lastStallRecoveryAtMs) < STALL_RECOVERY_COOLDOWN_MS) return;
+        stallRecoveryInFlight = true;
+        lastStallRecoveryAtMs = now;
+        try {
+          await log(`event_stall_detected reason='${String(reason || "unknown")}' offset=${streamOffset} chunks=${helperChunksSent} capture_state='${helperCaptureState}'`);
+          await window.whatControl.streamStop(baseUrl(), { preserve_desktop_audio: true, desktop_enabled: true });
+          await window.whatControl.setStreamSettings(baseUrl(), {
+            input_mode: "desktop",
+            mic_enabled: false,
+            desktop_enabled: true,
+            event_prefix: "EVENT:",
+          });
+          const restart = await window.whatControl.streamStart(baseUrl(), {});
+          if (restart && restart.ok) {
+            stallRecoveryAttempts += 1;
+            await log(`event_stall_recovery_ok attempt=${stallRecoveryAttempts}`);
+          } else {
+            await log(`event_stall_recovery_failed attempt=${stallRecoveryAttempts + 1}`);
+          }
+        } catch (err) {
+          await log(`event_stall_recovery_error ${String(err && err.message ? err.message : err)}`);
+        } finally {
+          stallRecoveryInFlight = false;
+        }
+      }
+
+      function maybeTriggerEventStallRecovery() {
+        if (!streamRunning) return;
+        const now = Date.now();
+        const sinceAdvance = now - Number(lastStreamAdvanceAtMs || now);
+        if (sinceAdvance < STALL_RECOVERY_AFTER_MS) return;
+        const chunkDelta = Math.max(0, Number(helperChunksSent || 0) - Number(helperChunksAtLastAdvance || 0));
+        const captureLooksLive = helperCaptureState === "signal" || helperCaptureState === "silent";
+        if (!captureLooksLive) return;
+        if (chunkDelta < STALL_MIN_CHUNKS_DELTA) return;
+        // Avoid false positives immediately after long natural pause in speech:
+        // require some prior transcript output in this run.
+        if (!lastTranscriptAppendAtMs) return;
+        void tryRecoverFromEventStall(`no_events_${Math.round(sinceAdvance / 1000)}s_chunks+${chunkDelta}`);
+      }
+
+      async function pollStreamLogs() {
+        try {
+          const resp = await window.whatControl.streamEvents(baseUrl(), streamOffset);
+          if (!resp || !resp.ok) return;
+          const nextOffset = Number(resp.next_offset || streamOffset);
+          const serverStalled = Boolean(resp.event_stalled);
+          const serverIdleSec = Number(resp.event_idle_sec || 0);
+          if (nextOffset < streamOffset) {
+            streamOffset = 0;
+          }
+          let advanced = false;
+          const rows = Array.isArray(resp.events) ? resp.events : [];
+          for (const row of rows) {
+            const seq = Number(row && row.seq);
+            if (Number.isFinite(seq) && seq <= lastStreamSeq) continue;
+            const evt = row && row.event && typeof row.event === "object"
+              ? row.event
+              : parseEventLine(row && row.line);
+            if (evt) handleEvent(evt);
+            if (Number.isFinite(seq) && seq > lastStreamSeq) lastStreamSeq = seq;
+          }
+          if (nextOffset > streamOffset) {
+            streamOffset = nextOffset;
+            advanced = true;
+          }
+          if (advanced) {
+            lastStreamAdvanceAtMs = Date.now();
+            helperChunksAtLastAdvance = helperChunksSent;
+          } else {
+            if (serverStalled) {
+              void tryRecoverFromEventStall(`server_no_events_${Math.round(serverIdleSec)}s`);
+            } else {
+              maybeTriggerEventStallRecovery();
+            }
+          }
+        } catch (_err) {}
+      }
+
+      async function refresh(force = false, background = false) {
+        if (refreshInFlight && !force) return;
+        refreshInFlight = true;
+        try {
+          let resp = null;
+          let controlResp = null;
+          let lastErr = null;
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            try {
+              [resp, controlResp] = await Promise.all([
+                window.whatControl.desktopAudioApiStatus(baseUrl(), { includeRouting: !background }),
+                window.whatControl.status(baseUrl()),
+              ]);
+              lastErr = null;
+              break;
+            } catch (err) {
+              lastErr = err;
+              await new Promise((r) => setTimeout(r, 600));
+            }
+          }
+          if (!resp) throw lastErr || new Error("status unavailable");
+          render(resp, controlResp);
+          if (!background) await log("status refreshed");
+        } catch (err) {
+          if (!background) statusOut.textContent = `status error: ${err.message}`;
+          // Allow manual actions even if status probe is temporarily unhealthy.
+          canInstall = true;
+          canUninstall = true;
+          if (!background) await log(`status error (${err.message})`);
+        } finally {
+          refreshInFlight = false;
+        }
+      }
+
+      refreshBtn.addEventListener("click", () => refresh(false, false));
+      installBtn.addEventListener("click", async () => {
+        if (busy) return;
+        try {
+          setBusy(true);
+          statusOut.textContent = "installing... (this can take up to a few minutes)";
+          await log("install requested");
+          const resp = await window.whatControl.desktopAudioApiInstall(baseUrl());
+          if (!resp || !resp.ok) {
+            statusOut.textContent = `install failed: ${(resp && resp.error) || "unknown"}`;
+            await log(`install failed (${(resp && resp.error) || "unknown"})`);
+          } else {
+            if (resp.routing_ok === false) {
+              const err = resp.routing_error || "routing_failed";
+              statusOut.textContent = `install partial: routing not ready (${err})`;
+              await log(`install partial (routing not ready: ${err})`);
+              const steps = Array.isArray(resp.manual_steps) ? resp.manual_steps : [];
+              for (const step of steps.slice(0, 5)) await log(`install next-step: ${step}`);
+            } else {
+              await log("install complete");
+            }
+          }
+          await refresh(true, true);
+        } catch (err) {
+          statusOut.textContent = `install error: ${err.message}`;
+          await log(`install error (${err.message})`);
+        } finally {
+          setBusy(false);
+        }
+      });
+      installDriverOnlyBtn.addEventListener("click", async () => {
+        if (busy) return;
+        try {
+          setBusy(true);
+          statusOut.textContent = "installing driver only... (this can take up to a few minutes)";
+          await log("install driver-only requested");
+          const resp = await window.whatControl.desktopAudioApiInstall(baseUrl(), { mode: "driver_only" });
+          if (!resp || !resp.ok) {
+            statusOut.textContent = `install driver-only failed: ${(resp && resp.error) || "unknown"}`;
+            await log(`install driver-only failed (${(resp && resp.error) || "unknown"})`);
+          } else {
+            await log("install driver-only complete");
+          }
+          await refresh(true, true);
+        } catch (err) {
+          statusOut.textContent = `install driver-only error: ${err.message}`;
+          await log(`install driver-only error (${err.message})`);
+        } finally {
+          setBusy(false);
+        }
+      });
+      uninstallBtn.addEventListener("click", async () => {
+        if (busy) return;
+        try {
+          setBusy(true);
+          statusOut.textContent = "uninstalling... (this can take up to a few minutes)";
+          await log("uninstall requested");
+          const resp = await window.whatControl.desktopAudioApiUninstall(baseUrl());
+          if (!resp || !resp.ok) {
+            statusOut.textContent = `uninstall failed: ${(resp && resp.error) || "unknown"}`;
+            await log(`uninstall failed (${(resp && resp.error) || "unknown"})`);
+          } else {
+            if (resp.routing_ok === false) {
+              const err = resp.routing_error || "routing_restore_failed";
+              statusOut.textContent = `uninstall partial: routing restore not ready (${err})`;
+              await log(`uninstall partial (routing restore not ready: ${err})`);
+            } else {
+              await log("uninstall complete");
+            }
+          }
+          await refresh(true, true);
+        } catch (err) {
+          statusOut.textContent = `uninstall error: ${err.message}`;
+          await log(`uninstall error (${err.message})`);
+        } finally {
+          setBusy(false);
+        }
+      });
+      pingBtn.addEventListener("click", async () => {
+        if (busy) return;
+        try {
+          setBusy(true);
+          statusOut.textContent = "sending ping and probing capture...";
+          await log("ping requested");
+          const resp = await window.whatControl.desktopAudioApiPing(baseUrl(), { backend: "avfoundation", duration_sec: 0.35 });
+          if (!resp || !resp.ok) {
+            statusOut.textContent = `ping failed: ${(resp && (resp.ping_error || resp.error)) || "unknown"}`;
+            await log(`ping failed (${(resp && (resp.ping_error || resp.error)) || "unknown"})`);
+          } else {
+            const rows = Array.isArray(resp.rows) ? resp.rows : [];
+            const summary = rows
+              .map((r) => `${r.selector}:${r.state}:lvl=${r.level}:rms=${r.rms}:bytes=${r.bytes}`)
+              .join(" | ");
+            await log(`ping probe selected=${resp.selected || "-"} rows=${summary}`);
+          }
+          await refresh(true, true);
+        } catch (err) {
+          statusOut.textContent = `ping error: ${err.message}`;
+          await log(`ping error (${err.message})`);
+        } finally {
+          setBusy(false);
+        }
+      });
+      startTranscriptBtn.addEventListener("click", async () => {
+        if (busy) return;
+        try {
+          setBusy(true);
+          transcriptLines = [];
+          clearTranscriptDedupeState();
+          lastEventSessionKey = "";
+          streamOffset = 0;
+          lastStreamAdvanceAtMs = Date.now();
+          helperChunksAtLastAdvance = helperChunksSent;
+          lastTranscriptAppendAtMs = 0;
+          stallRecoveryAttempts = 0;
+          renderTranscript();
+          statusOut.textContent = "starting desktop transcript...";
+          await log("desktop transcript start requested");
+          await window.whatControl.setStreamSettings(baseUrl(), {
+            input_mode: "desktop",
+            mic_enabled: false,
+            desktop_enabled: true,
+            event_prefix: "EVENT:",
+          });
+          const resp = await window.whatControl.streamStart(baseUrl(), {});
+          if (!resp || !resp.ok) {
+            statusOut.textContent = "desktop transcript start failed";
+            await log("desktop transcript start failed");
+          } else {
+            await log("desktop transcript started");
+          }
+          await refresh(true, true);
+          await pollStreamLogs();
+        } catch (err) {
+          statusOut.textContent = `desktop transcript start error: ${err.message}`;
+          await log(`desktop transcript start error (${err.message})`);
+        } finally {
+          setBusy(false);
+        }
+      });
+      stopTranscriptBtn.addEventListener("click", async () => {
+        if (busy) return;
+        try {
+          setBusy(true);
+          statusOut.textContent = "stopping desktop transcript...";
+          await log("desktop transcript stop requested");
+          await window.whatControl.streamStop(baseUrl(), { preserve_desktop_audio: true, desktop_enabled: false });
+          await window.whatControl.setStreamSettings(baseUrl(), { desktop_enabled: false, mic_enabled: false });
+          stallRecoveryAttempts = 0;
+          stallRecoveryInFlight = false;
+          await log("desktop transcript stopped");
+          await refresh(true);
+        } catch (err) {
+          statusOut.textContent = `desktop transcript stop error: ${err.message}`;
+          await log(`desktop transcript stop error (${err.message})`);
+        } finally {
+          setBusy(false);
+        }
+      });
+      closeBtn.addEventListener("click", () => window.close());
+
+      refresh(false, true);
+      renderTranscript();
+      const refreshTimer = setInterval(() => { refresh(false, true); }, 1000);
+      const logTimer = setInterval(() => { pollStreamLogs(); }, 400);
+      window.addEventListener("beforeunload", () => {
+        clearInterval(refreshTimer);
+        clearInterval(logTimer);
+      });
+    </script>
+  </body>
+</html>

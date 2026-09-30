@@ -1,0 +1,18 @@
+# Store and export text with LF endings: a snapshot exported from a Windows checkout
+# (core.autocrlf=true) would otherwise ship CRLF shebang/shell scripts that fail on
+# macOS and Linux.
+* text=auto eol=lf
+*.png binary
+*.icns binary
+*.ico binary
+*.wav binary
+
+# Maintainer-only tooling kept in this repository but left out of the public source
+# snapshot (`git archive`, see scripts/export_public_source.py).
+docs/PUBLICATION.md export-ignore
+scripts/audit_publication.py export-ignore
+scripts/export_public_source.py export-ignore
+tests/test_publication_tools.py export-ignore
+docs/benchmarks/ export-ignore
+scripts/desktop_case_benchmark.py export-ignore
+scripts/run_desktop_case_benchmark.sh export-ignore

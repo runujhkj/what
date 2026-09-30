@@ -1,0 +1,62 @@
+name: Release
+
+# Push a tag like v0.1.0 to build the installers and attach them to a draft GitHub
+# Release (publish it from the Releases page after checking the notes). Run manually
+# (workflow_dispatch) to build the artifacts without creating a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The runner image has Node, CMake and the VS 2022 C++ tools, so nothing is installed.
+      - name: Build installer
+        shell: pwsh
+        run: ./scripts/package/build_windows.ps1 -NoInstall
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: gui/dist/*-setup.exe
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build AppImage
+        run: |
+          npm --prefix gui ci
+          npm --prefix gui run dist:linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: gui/dist/*.AppImage
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/*

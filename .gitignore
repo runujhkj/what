@@ -1,0 +1,62 @@
+.env
+.env.*
+!.env.client.example
+!.env.service.example
+corrections/
+.pytest_cache/
+_venv/
+cudnn-linux-x86_64-9.1.0.70_cuda12-archive
+cudnn-linux-x86_64-9.1.0.70_cuda12-archive.tar.xz
+*__pycache__*
+*.pyc
+logs/
+audio/
+*.egg-info*
+what.egg-info/
+what.egg-info/PKG-INFO
+what.egg-info/SOURCES.txt
+what.egg-info/dependency_links.txt
+what.egg-info/entry_points.txt
+what.egg-info/requires.txt
+what.egg-info/top_level.txt
+screenshots
+capture.txt
+.DS_Store
+GEMINI.md
+codex-next
+what.tar.gz
+what.egg-info
+package-lock.json
+!gui/package-lock.json
+
+# Build/runtime artifacts that should not be versioned
+gui/node_modules/
+gui/build/
+gui/dist/
+obs-plugin/build/
+obs-plugin/build-no-panel/
+bin/__pycache__/
+native/what-coreaudio-tap/.build/
+native/what-coreaudio-tap/.swiftpm/
+bin/WhatCoreAudioTap.app/
+obs-logs
+rgoutput
+.claude/
+native/WhisperKitWorker/.build/
+
+# Local virtualenv (Linux setup creates .venv; macOS uses _venv above)
+.venv/
+
+# Timestamped config backups written when settings are rewritten
+config/*.bak.*
+# Local speech reference retained outside the public source snapshot
+docs/benchmarks/golden_input_01_reference_script.txt
+# Python distribution builds
+/build/
+/dist/
+
+# Coverage / pytest artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/

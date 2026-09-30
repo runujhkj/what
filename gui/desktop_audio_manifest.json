@@ -1,0 +1,13 @@
+{
+  "packages": [
+    {
+      "name": "blackhole2ch",
+      "download_url": "",
+      "candidates": [
+        { "relative_path": "assets/desktop-audio/BlackHole2ch.pkg" },
+        { "relative_path": "dist/assets/desktop-audio/BlackHole2ch.pkg" }
+      ],
+      "sha256": "c829afa041a9f6e1b369c01953c8f079740dd1f02421109855829edc0d3c1988"
+    }
+  ]
+}

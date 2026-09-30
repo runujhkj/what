@@ -1,0 +1,337 @@
+#!/usr/bin/swift
+import Foundation
+import CoreAudio
+
+struct Json {
+  static func printObj(_ obj: [String: Any]) {
+    if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]),
+       let text = String(data: data, encoding: .utf8) {
+      print(text)
+    } else {
+      print("{\"ok\":false,\"error\":\"json_encode_failed\"}")
+    }
+  }
+}
+
+func deviceList() -> [AudioObjectID] {
+  var addr = AudioObjectPropertyAddress(
+    mSelector: kAudioHardwarePropertyDevices,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+  )
+  var size: UInt32 = 0
+  var status = AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size)
+  if status != noErr || size == 0 {
+    return []
+  }
+  let count = Int(size) / MemoryLayout<AudioObjectID>.size
+  var ids = Array(repeating: AudioObjectID(0), count: count)
+  status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids)
+  if status != noErr {
+    return []
+  }
+  return ids
+}
+
+func outputChannelCount(_ id: AudioObjectID) -> Int {
+  var addr = AudioObjectPropertyAddress(
+    mSelector: kAudioDevicePropertyStreamConfiguration,
+    mScope: kAudioObjectPropertyScopeOutput,
+    mElement: kAudioObjectPropertyElementMain
+  )
+  var size: UInt32 = 0
+  var status = AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size)
+  if status != noErr || size == 0 {
+    return 0
+  }
+  let rawPtr = UnsafeMutableRawPointer.allocate(
+    byteCount: Int(size),
+    alignment: MemoryLayout<AudioBufferList>.alignment
+  )
+  defer { rawPtr.deallocate() }
+  let ptr = rawPtr.bindMemory(to: AudioBufferList.self, capacity: 1)
+  status = AudioObjectGetPropertyData(id, &addr, 0, nil, &size, ptr)
+  if status != noErr {
+    return 0
+  }
+  let listPtr = UnsafeMutableAudioBufferListPointer(ptr)
+  var channels = 0
+  for buf in listPtr {
+    channels += Int(buf.mNumberChannels)
+  }
+  return channels
+}
+
+func outputDeviceList() -> [AudioObjectID] {
+  return deviceList().filter { id in
+    outputChannelCount(id) > 0
+  }
+}
+
+func deviceName(_ id: AudioObjectID) -> String {
+  var addr = AudioObjectPropertyAddress(
+    mSelector: kAudioObjectPropertyName,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+  )
+  var cf: CFString = "" as CFString
+  var size = UInt32(MemoryLayout<CFString>.size)
+  let status = AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &cf)
+  if status != noErr { return "" }
+  return cf as String
+}
+
+func deviceUID(_ id: AudioObjectID) -> String {
+  var addr = AudioObjectPropertyAddress(
+    mSelector: kAudioDevicePropertyDeviceUID,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+  )
+  var cf: CFString = "" as CFString
+  var size = UInt32(MemoryLayout<CFString>.size)
+  let status = AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &cf)
+  if status != noErr { return "" }
+  return cf as String
+}
+
+func findByName(_ exact: String) -> AudioObjectID? {
+  for id in outputDeviceList() {
+    if deviceName(id).lowercased() == exact.lowercased() {
+      return id
+    }
+  }
+  return nil
+}
+
+func findByUID(_ uid: String) -> AudioObjectID? {
+  for id in outputDeviceList() {
+    if deviceUID(id) == uid {
+      return id
+    }
+  }
+  return nil
+}
+
+func defaultOutputDeviceID() -> AudioObjectID? {
+  var addr = AudioObjectPropertyAddress(
+    mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+  )
+  var id = AudioObjectID(0)
+  var size = UInt32(MemoryLayout<AudioObjectID>.size)
+  let status = AudioObjectGetPropertyData(
+    AudioObjectID(kAudioObjectSystemObject),
+    &addr,
+    0,
+    nil,
+    &size,
+    &id
+  )
+  if status != noErr { return nil }
+  return id
+}
+
+func setDefaultOutputDevice(_ id: AudioObjectID) -> Int32 {
+  var addr = AudioObjectPropertyAddress(
+    mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+  )
+  var mutable = id
+  let size = UInt32(MemoryLayout<AudioObjectID>.size)
+  let status = AudioObjectSetPropertyData(
+    AudioObjectID(kAudioObjectSystemObject),
+    &addr,
+    0,
+    nil,
+    size,
+    &mutable
+  )
+  return status
+}
+
+func createAggregate(name: String, uid: String, outputName: String, loopbackName: String) -> [String: Any] {
+  if let existing = findByName(name) {
+    return [
+      "ok": true,
+      "changed": false,
+      "exists": true,
+      "device_id": Int(existing),
+      "device_uid": deviceUID(existing),
+      "name": name
+    ]
+  }
+  guard let outID = findByName(outputName) else {
+    return ["ok": false, "error": "missing_output_device", "output_name": outputName]
+  }
+  guard let loopID = findByName(loopbackName) else {
+    return ["ok": false, "error": "missing_loopback_device", "loopback_name": loopbackName]
+  }
+  let outUID = deviceUID(outID)
+  let loopUID = deviceUID(loopID)
+  if outUID.isEmpty || loopUID.isEmpty {
+    return ["ok": false, "error": "missing_device_uid", "output_uid": outUID, "loopback_uid": loopUID]
+  }
+
+  let subDevices: [[String: Any]] = [
+    [
+      kAudioSubDeviceUIDKey as String: outUID,
+      kAudioSubDeviceDriftCompensationKey as String: 0
+    ],
+    [
+      kAudioSubDeviceUIDKey as String: loopUID,
+      kAudioSubDeviceDriftCompensationKey as String: 1
+    ]
+  ]
+  let dict: [String: Any] = [
+    kAudioAggregateDeviceNameKey as String: name,
+    kAudioAggregateDeviceUIDKey as String: uid,
+    kAudioAggregateDeviceSubDeviceListKey as String: subDevices,
+    kAudioAggregateDeviceMainSubDeviceKey as String: outUID,
+    kAudioAggregateDeviceIsStackedKey as String: 1,
+    kAudioAggregateDeviceIsPrivateKey as String: 0
+  ]
+  var newID = AudioObjectID(0)
+  let status = AudioHardwareCreateAggregateDevice(dict as CFDictionary, &newID)
+  if status != noErr {
+    return ["ok": false, "error": "create_failed", "status": Int(status), "name": name, "uid": uid]
+  }
+  usleep(300_000)
+  let createdUID = deviceUID(newID)
+  return [
+    "ok": true,
+    "changed": true,
+    "exists": false,
+    "device_id": Int(newID),
+    "device_uid": createdUID.isEmpty ? uid : createdUID,
+    "name": name
+  ]
+}
+
+func destroyAggregate(uid: String) -> [String: Any] {
+  guard let id = findByUID(uid) else {
+    return ["ok": true, "changed": false, "missing": true, "uid": uid]
+  }
+  let status = AudioHardwareDestroyAggregateDevice(id)
+  if status != noErr {
+    return ["ok": false, "error": "destroy_failed", "status": Int(status), "uid": uid]
+  }
+  usleep(200_000)
+  return ["ok": true, "changed": true, "uid": uid]
+}
+
+func usage() {
+  let msg = """
+  usage:
+    what-coreaudio-aggregate create --name <name> --uid <uid> --output-name <name> --loopback-name <name>
+    what-coreaudio-aggregate destroy --uid <uid>
+    what-coreaudio-aggregate list-outputs
+    what-coreaudio-aggregate current-output
+    what-coreaudio-aggregate set-output --name <name>
+  """
+  fputs(msg + "\n", stderr)
+}
+
+let args = Array(CommandLine.arguments.dropFirst())
+if args.isEmpty {
+  usage()
+  Json.printObj(["ok": false, "error": "missing_command"])
+  exit(2)
+}
+let command = args[0]
+
+func value(_ key: String) -> String {
+  if let idx = args.firstIndex(of: key), idx + 1 < args.count {
+    return args[idx + 1]
+  }
+  return ""
+}
+
+if command == "create" {
+  let name = value("--name")
+  let uid = value("--uid")
+  let outputName = value("--output-name")
+  let loopbackName = value("--loopback-name")
+  if name.isEmpty || uid.isEmpty || outputName.isEmpty || loopbackName.isEmpty {
+    Json.printObj(["ok": false, "error": "missing_args"])
+    exit(2)
+  }
+  let out = createAggregate(name: name, uid: uid, outputName: outputName, loopbackName: loopbackName)
+  Json.printObj(out)
+  exit((out["ok"] as? Bool) == true ? 0 : 1)
+}
+
+if command == "destroy" {
+  let uid = value("--uid")
+  if uid.isEmpty {
+    Json.printObj(["ok": false, "error": "missing_uid"])
+    exit(2)
+  }
+  let out = destroyAggregate(uid: uid)
+  Json.printObj(out)
+  exit((out["ok"] as? Bool) == true ? 0 : 1)
+}
+
+if command == "list-outputs" {
+  let outputs = outputDeviceList().map { id in
+    [
+      "id": Int(id),
+      "name": deviceName(id),
+      "uid": deviceUID(id),
+    ] as [String: Any]
+  }
+  Json.printObj(["ok": true, "outputs": outputs])
+  exit(0)
+}
+
+if command == "current-output" {
+  guard let id = defaultOutputDeviceID() else {
+    Json.printObj(["ok": false, "error": "default_output_unavailable"])
+    exit(1)
+  }
+  Json.printObj([
+    "ok": true,
+    "id": Int(id),
+    "name": deviceName(id),
+    "uid": deviceUID(id),
+  ])
+  exit(0)
+}
+
+if command == "set-output" {
+  let name = value("--name")
+  let uid = value("--uid")
+  if name.isEmpty && uid.isEmpty {
+    Json.printObj(["ok": false, "error": "missing_name_or_uid"])
+    exit(2)
+  }
+  let resolved: AudioObjectID? = uid.isEmpty ? findByName(name) : findByUID(uid)
+  guard let id = resolved else {
+    Json.printObj([
+      "ok": false,
+      "error": "missing_output_device",
+      "output_name": name,
+      "output_uid": uid,
+    ])
+    exit(1)
+  }
+  let status = setDefaultOutputDevice(id)
+  if status != noErr {
+    Json.printObj(["ok": false, "error": "set_output_failed", "status": Int(status), "name": name])
+    exit(1)
+  }
+  usleep(200_000)
+  Json.printObj([
+    "ok": true,
+    "changed": true,
+    "id": Int(id),
+    "name": deviceName(id),
+    "uid": deviceUID(id),
+  ])
+  exit(0)
+}
+
+usage()
+Json.printObj(["ok": false, "error": "invalid_command"])
+exit(2)

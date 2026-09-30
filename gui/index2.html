@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>what</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "IBM Plex Sans", "Source Sans 3", "Helvetica Neue", Arial, sans-serif;
+        background: #0f1116;
+        color: #e8e4db;
+        --border: #2a2f3a;
+        --surface: #161a22;
+        --surface2: #0b0d12;
+        --accent-mic: rgba(104, 196, 255, 0.9);
+        --accent-desktop: rgba(255, 190, 96, 0.92);
+        --accent-mixed: rgba(171, 131, 255, 0.88);
+        --muted: #a6adba;
+        --danger: #ff4b4b;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        padding: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* ── Header ─────────────────────────────────────────────── */
+
+      #header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 20px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      #header h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        flex: 1;
+      }
+
+      #controllerDot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #404650;
+        flex-shrink: 0;
+        transition: background 0.2s;
+      }
+
+      #controllerDot.up { background: #4ade80; }
+      #controllerDot.error { background: var(--danger); }
+
+      #controllerLabel {
+        font-size: 12px;
+        color: var(--muted);
+        flex-shrink: 0;
+      }
+
+      /* ── Main content ────────────────────────────────────────── */
+
+      #main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+      }
+
+      /* ── Action section ──────────────────────────────────────── */
+
+      #actionSection {
+        padding: 20px 20px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      #startStopBtn {
+        width: 100%;
+        padding: 14px;
+        border-radius: 12px;
+        border: none;
+        font-size: 16px;
+        font-weight: 700;
+        cursor: pointer;
+        background: #2a2f3a;
+        color: #e8e4db;
+        transition: background 0.15s, opacity 0.15s;
+      }
+
+      #startStopBtn:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+
+      #startStopBtn.running {
+        background: #3d1a1a;
+        color: #ff8080;
+        border: 1px solid #6b2a2a;
+      }
+
+      #startStopBtn.starting,
+      #startStopBtn.stopping {
+        background: #1d2230;
+        color: var(--muted);
+      }
+
+      /* ── Status line ─────────────────────────────────────────── */
+
+      #statusLine {
+        font-size: 12px;
+        color: var(--muted);
+        min-height: 16px;
+        font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+      }
+
+      #statusLine.error { color: var(--danger); }
+
+      /* ── Source toggles ──────────────────────────────────────── */
+
+      #sourceSection {
+        padding: 16px 20px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .section-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        font-weight: 600;
+      }
+
+      #sourceRow {
+        display: flex;
+        gap: 8px;
+      }
+
+      .source-btn {
+        flex: 1;
+        padding: 9px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: #cdd2dc;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.1s, border-color 0.1s, color 0.1s;
+        position: relative;
+      }
+
+      .source-btn.active-mic {
+        background: rgba(104, 196, 255, 0.12);
+        border-color: rgba(104, 196, 255, 0.45);
+        color: #a8dcff;
+      }
+
+      .source-btn.active-desktop {
+        background: rgba(255, 190, 96, 0.12);
+        border-color: rgba(255, 190, 96, 0.45);
+        color: #ffd080;
+      }
+
+      .source-btn:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+
+      /* ── Transcript ──────────────────────────────────────────── */
+
+      #transcriptSection {
+        flex: 1;
+        padding: 16px 20px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 0;
+      }
+
+      #transcriptSection.dual {
+        gap: 12px;
+      }
+
+      .transcript-panel-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-height: 0;
+        flex: 1;
+      }
+
+      .transcript-panel-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-weight: 600;
+      }
+
+      #micPanelLabel { color: rgba(104, 196, 255, 0.7); }
+      #desktopPanelLabel { color: rgba(255, 190, 96, 0.7); }
+
+      #transcriptSection:not(.dual) .transcript-panel-label { display: none; }
+      #transcriptSection:not(.dual) .section-label-single { display: block; }
+      #transcriptSection.dual .section-label-single { display: none; }
+
+      .transcript-out {
+        flex: 1;
+        font-size: 14px;
+        line-height: 1.6;
+        color: #e8e4db;
+        overflow-y: auto;
+        user-select: text;
+        cursor: text;
+        min-height: 60px;
+        max-height: 280px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: var(--surface2);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .transcript-out .w,
+      .transcript-out .seg { border-radius: 3px; }
+      body.seek-mod .transcript-out .w:hover,
+      body.seek-mod .transcript-out .seg:not(:has(.w)):hover {
+        text-decoration: underline;
+        cursor: pointer;
+      }
+      .transcript-out .seg.playing { background: rgba(104, 196, 255, 0.18); }
+      .transcript-out .seg.edited { text-decoration: underline dotted rgba(171, 131, 255, 0.8); }
+      .transcript-out .seg.editing {
+        outline: 1px solid rgba(171, 131, 255, 0.8);
+        background: rgba(171, 131, 255, 0.12);
+        padding: 0 2px;
+      }
+      .transcript-out .seg.saving { opacity: 0.6; }
+      .transcript-out.empty { color: var(--muted); }
+
+      .return-live {
+        align-self: flex-end;
+        padding: 4px 10px;
+        border-radius: 7px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: #cdd2dc;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      #replayBar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        border-radius: 8px;
+        border: 1px solid rgba(104, 196, 255, 0.45);
+        background: rgba(104, 196, 255, 0.12);
+        color: #a8dcff;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      #replayBar[hidden] { display: none; }
+      #replayLabel { flex: 1; }
+      #replayStopBtn {
+        padding: 4px 12px;
+        border-radius: 7px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: #e8e4db;
+        cursor: pointer;
+      }
+
+      /* ── Settings ────────────────────────────────────────────── */
+
+      #settingsSection {
+        margin: 16px 20px 0;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+
+      #settingsSection summary {
+        padding: 10px 14px;
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        cursor: pointer;
+        list-style: none;
+        user-select: none;
+        background: var(--surface);
+      }
+
+      #settingsSection summary::-webkit-details-marker { display: none; }
+
+      #settingsSection summary::after {
+        content: "▸";
+        float: right;
+        transition: transform 0.15s;
+      }
+
+      #settingsSection[open] summary::after {
+        transform: rotate(90deg);
+      }
+
+      #settingsBody {
+        padding: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        border-top: 1px solid var(--border);
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .field label {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+
+      .field input[type="text"],
+      .field input[type="number"],
+      .field input:not([type]),
+      .field select#gpuBudgetSelect {
+        padding: 7px 10px;
+        border-radius: 7px;
+        border: 1px solid var(--border);
+        background: var(--surface2);
+        color: #e8e4db;
+        font-size: 13px;
+        width: 100%;
+      }
+
+      .field-hint {
+        font-size: 11px;
+        line-height: 1.4;
+        color: var(--muted);
+      }
+
+      .inline-label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: #cdd2dc;
+        cursor: pointer;
+      }
+
+      .inline-label input[type="checkbox"] {
+        width: auto;
+        margin: 0;
+        accent-color: #68c4ff;
+      }
+
+      #desktopSetupBtn {
+        align-self: flex-start;
+        padding: 7px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: #cdd2dc;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+
+      #desktopSetupBtn:hover {
+        background: #1e2430;
+      }
+
+      /* ── Debug ───────────────────────────────────────────────── */
+
+      #debugSection {
+        margin: 16px 20px 20px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+
+      #debugSection summary {
+        padding: 10px 14px;
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        cursor: pointer;
+        list-style: none;
+        user-select: none;
+        background: var(--surface);
+      }
+
+      #debugSection summary::-webkit-details-marker { display: none; }
+
+      #debugSection summary::after {
+        content: "▸";
+        float: right;
+        transition: transform 0.15s;
+      }
+
+      #debugSection[open] summary::after {
+        transform: rotate(90deg);
+      }
+
+      #debugOut {
+        padding: 10px 14px;
+        font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        white-space: pre-wrap;
+        max-height: 200px;
+        overflow-y: auto;
+        border-top: 1px solid var(--border);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="header">
+      <h1>what</h1>
+      <span id="controllerDot"></span>
+      <span id="controllerLabel">controller</span>
+    </div>
+
+    <div id="main">
+      <section id="actionSection">
+        <button id="startStopBtn" disabled>Start</button>
+        <div id="statusLine">checking controller…</div>
+      </section>
+
+      <section id="sourceSection">
+        <div class="section-label">Source</div>
+        <div id="sourceRow">
+          <button id="micBtn" class="source-btn active-mic">Mic</button>
+          <button id="desktopBtn" class="source-btn">Desktop</button>
+        </div>
+      </section>
+
+      <section id="transcriptSection">
+        <div class="section-label section-label-single">Transcript</div>
+        <div id="replayBar" hidden>
+          <span id="replayLabel"></span>
+          <button id="replayStopBtn" title="Stop replay (Esc)">Stop</button>
+        </div>
+
+        <div class="transcript-panel-wrap" id="micPanel">
+          <div class="transcript-panel-label" id="micPanelLabel">Mic</div>
+          <div class="transcript-out" id="micTranscriptOut"
+               title="Double-click to correct · ⌘/Ctrl-click a word to replay from it"></div>
+          <button class="return-live" id="micReturnLive" hidden>Return to live</button>
+        </div>
+
+        <div class="transcript-panel-wrap" id="desktopPanel">
+          <div class="transcript-panel-label" id="desktopPanelLabel">Desktop</div>
+          <div class="transcript-out" id="desktopTranscriptOut"
+               title="Double-click to correct · ⌘/Ctrl-click a word to replay from it"></div>
+          <button class="return-live" id="desktopReturnLive" hidden>Return to live</button>
+        </div>
+      </section>
+
+      <details id="settingsSection">
+        <summary>Settings</summary>
+        <div id="settingsBody">
+          <div class="field">
+            <label>Mic source</label>
+            <select id="micModeSelect" style="padding:7px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface2);color:#e8e4db;font-size:13px;width:100%;">
+              <option value="mic">Microphone</option>
+              <option value="file">Audio file</option>
+            </select>
+          </div>
+          <div class="field" id="micDeviceField">
+            <label>Mic device</label>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <select id="micDeviceSelect" style="flex:1;padding:7px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface2);color:#e8e4db;font-size:13px;">
+                <option value="default">System default input</option>
+              </select>
+              <button id="refreshMicBtn" title="Refresh device list" style="padding:7px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:#cdd2dc;font-size:12px;cursor:pointer;flex-shrink:0;">↺</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="playbackDeviceSelect">Transcript playback output</label>
+            <select id="playbackDeviceSelect"><option value="default">System default output</option></select>
+            <button id="refreshPlaybackBtn">Refresh outputs</button>
+          </div>
+          <div class="field" id="micFileField" style="display:none;">
+            <label>Audio file</label>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <select id="micFileSelect" style="flex:1;padding:7px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface2);color:#e8e4db;font-size:13px;">
+                <option value="">— pick a file —</option>
+              </select>
+              <button id="browseMicFileBtn" title="Browse for audio file" style="padding:7px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:#cdd2dc;font-size:12px;cursor:pointer;flex-shrink:0;">…</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="profileInput">Profile</label>
+            <input id="profileInput" type="text" value="captions"
+                   placeholder="captions | cpu_friendly | paragraph" />
+          </div>
+          <div class="field">
+            <label for="delayInput">Delay (s)</label>
+            <input id="delayInput" type="number" min="0" max="90" step="1" value="0" />
+          </div>
+          <div class="field">
+            <label class="inline-label">
+              <input id="noVadInput" type="checkbox" />
+              Disable VAD (–no-vad)
+            </label>
+          </div>
+          <div class="field" id="gpuBudgetField">
+            <label for="gpuBudgetSelect">GPU memory limit</label>
+            <select id="gpuBudgetSelect">
+              <option value="0">No limit (largest model that loads)</option>
+              <option value="1024">1 GB</option>
+              <option value="1536">1.5 GB</option>
+              <option value="2048">2 GB</option>
+              <option value="3072">3 GB</option>
+              <option value="4096">4 GB</option>
+              <option value="6144">6 GB</option>
+              <option value="8192">8 GB</option>
+            </select>
+            <div class="field-hint" id="gpuBudgetHint">NVIDIA GPUs only. Applies at the next Start: the largest speech model that fits is used, or the CPU if none does.</div>
+          </div>
+          <button id="desktopSetupBtn">Desktop Audio Setup…</button>
+        </div>
+      </details>
+
+      <details id="debugSection">
+        <summary>Debug</summary>
+        <div id="debugOut"></div>
+      </details>
+    </div>
+
+    <script src="lib/live_caption_bridge.js"></script>
+    <script src="lib/transcript_record.js"></script>
+    <script src="lib/transcript_view.js"></script>
+    <script src="lib/output_watch.js"></script>
+    <script src="lib/device_switching.js"></script>
+    <script src="renderer2.js"></script>
+  </body>
+</html>

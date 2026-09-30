@@ -1,0 +1,142 @@
+# Mac (Apple Silicon) config: faster-whisper/CTranslate2 has no CUDA or Metal
+# here, so it runs on CPU. This mirrors config/default.toml but swaps the three
+# ASR keys that made the CUDA-box defaults ~1.8x slower than real-time on a Mac:
+#   model_size: medium -> small   (~4-6x faster)
+#   compute_type: float16 -> int8 (float16 is invalid on CPU)
+#   device: cuda -> cpu
+# Launch:  what control --config config/mac.toml ...
+[app]
+name = "what"
+
+[audio]
+sample_rate = 16000
+channels = 1
+frame_ms = 30
+chunk_ms = 800
+overlap_ms = 0
+boundary_candidate_points = 3
+
+[input]
+mode = "mic" # mic|file|stdin|desktop
+mic_backend = "pulse" # pulse|alsa|avfoundation
+mic_device = "default"
+mic_enabled = true
+desktop_backend = "avfoundation" # avfoundation|pulse|wasapi
+desktop_device = ""
+desktop_enabled = false
+file_path = ""
+
+[vad]
+enabled = true
+mode = 2 # 0-3, higher is more aggressive
+speech_ratio = 0.2
+
+[asr]
+model_size = "small"
+compute_type = "int8"
+beam_size = 1
+language = "en"
+device = "cpu"
+device_index = 0
+min_avg_logprob = -1.0
+no_speech_threshold = 0.6
+logprob_threshold = -1.0
+compression_ratio_threshold = 2.4
+condition_on_previous_text = false
+
+[languages]
+allowed = ["en", "es", "zh"]
+
+[output]
+text_stream = true
+jsonl_log = ""
+jsonl_dir = "logs"
+text_mode = "delta"
+text_window_segments = 0
+text_window_chars = 0
+text_block_clear = false
+text_normalize = false
+
+[service]
+host = "0.0.0.0"
+port = 8765
+sse_path = "/events"
+ws_path = "/ingest"
+http_path = "/ingest-http"
+pair_path = "/pair"
+local_pair = true
+mdns_name = "what"
+mdns_enabled = true
+advertise_host = ""
+max_clients = 4
+
+[client]
+transport = "pcm" # pcm|opus
+target_host = "127.0.0.1"
+target_port = 8765
+target_ws_path = "/ingest"
+target_sse_path = "/events"
+
+[presets.fast.audio]
+chunk_ms = 640
+overlap_ms = 320
+
+[presets.fast.asr]
+model_size = "small"
+beam_size = 1
+
+[presets.accurate.audio]
+chunk_ms = 1200
+overlap_ms = 600
+
+[presets.accurate.asr]
+model_size = "large-v2"
+beam_size = 8
+
+[profiles.captions.audio]
+chunk_ms = 800
+overlap_ms = 0
+
+[profiles.captions.asr]
+beam_size = 1
+condition_on_previous_text = false
+
+[profiles.captions.output]
+text_mode = "delta"
+text_window_segments = 0
+text_window_chars = 0
+text_block_clear = false
+text_normalize = true
+
+[profiles.paragraph.audio]
+chunk_ms = 1400
+overlap_ms = 400
+
+[profiles.paragraph.asr]
+beam_size = 5
+condition_on_previous_text = true
+
+[profiles.paragraph.output]
+text_mode = "block"
+text_window_segments = 8
+text_window_chars = 800
+text_block_clear = true
+text_normalize = false
+
+[profiles.cpu_friendly.audio]
+chunk_ms = 1200
+overlap_ms = 200
+
+[profiles.cpu_friendly.asr]
+model_size = "small"
+beam_size = 1
+device = "cpu"
+compute_type = "int8"
+condition_on_previous_text = false
+
+[profiles.cpu_friendly.output]
+text_mode = "delta"
+text_window_segments = 0
+text_window_chars = 0
+text_block_clear = false
+text_normalize = true

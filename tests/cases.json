@@ -1,0 +1,12 @@
+[
+  {
+    "id": "sample1",
+    "audio": "audio/sample1.wav",
+    "text": "The quick brown fox jumps over the lazy dog while the radio plays in the next room."
+  },
+  {
+    "id": "sample2",
+    "audio": "audio/sample2.wav",
+    "text": "Please set the meeting for Tuesday at three thirty and bring the quarterly report."
+  }
+]

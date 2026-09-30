@@ -1,0 +1,14 @@
+{
+  "python": {
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.12.14%2B20260924-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+  },
+  "ffmpeg": {
+    "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip"
+  },
+  "obs": {
+    "comment": "Plugin is compiled against these libobs headers; OBS loads it on this version and newer.",
+    "version": "30.2.3",
+    "source_url": "https://github.com/obsproject/obs-studio/archive/refs/tags/30.2.3.tar.gz",
+    "binary_url": "https://github.com/obsproject/obs-studio/releases/download/30.2.3/OBS-Studio-30.2.3-Windows.zip"
+  }
+}
