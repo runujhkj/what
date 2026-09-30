@@ -14,17 +14,24 @@ v0.1 is one application with the same feature set on macOS, Linux, and Windows:
 - A retained, scrollable transcript with **Return to live**.
 - Modifier-click a word to replay its recording; double-click a segment to correct it.
 - Browser captions for OBS, as a plain Browser source or the What Caption Box plugin.
+- A readable all-source transcript (`transcript.txt`) and a single session file
+  (`<session_id>.what`) for every run; **File → Open Session** reopens one to review, edit,
+  replay, or continue it.
 - Everything local: recordings, transcripts, and corrections stay on your machine
-  (`logs/<session_id>/` in a source checkout, `%APPDATA%\What\logs` for the Windows app).
+  (`logs/<session_id>/` in a source checkout; in the apps, `%APPDATA%\What\logs` on Windows,
+  `~/Library/Application Support/What/logs` on macOS, `~/.config/What/logs` on Linux).
 
 The workflow and UI are identical across platforms. What differs underneath is the speech
 engine and the desktop-audio backend, chosen automatically per platform (see the table
 below). No cloud services and no account are involved.
 
-## Download (Windows)
+## Download
 
-Get `what-<version>-x64-setup.exe` from the [latest release](../../releases/latest) and run
-it. Nothing else needs to be installed: the app brings its own Python and FFmpeg, and it
+Get the file for your platform from the [latest release](../../releases/latest).
+
+### Windows
+
+Download `what-<version>-x64-setup.exe` and run it. Nothing else needs to be installed: the app brings its own Python and FFmpeg, and it
 installs per user, without administrator rights.
 
 - **"Windows protected your PC":** the installer is not code-signed yet, so SmartScreen
@@ -38,7 +45,36 @@ installs per user, without administrator rights.
 - Settings, the GPU runtime, and recordings live in `%APPDATA%\What`; uninstalling the app
   leaves that folder in place.
 
-macOS and Linux run from source for now (see [Setup](#setup)).
+### macOS (Apple Silicon)
+
+Download `what-<version>-arm64.dmg` (or the `-mac.zip`), drag **What** to Applications.
+Nothing else needs to be installed: the app brings its own Python and FFmpeg.
+
+- **First launch:** the app is not signed with an Apple Developer ID or notarized, so
+  Gatekeeper blocks it ("Apple could not verify 'What'…" or "What is damaged", offering
+  Move to Trash). Choose **Done**, then clear the download flag in Terminal and open it:
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/What.app
+  open /Applications/What.app
+  ```
+  **System Settings → Privacy & Security → Open Anyway** also approves it, but Gatekeeper's
+  first-launch check of the app can then take a long time, leaving the app in the Dock with
+  no window. If that happens, quit it and use the commands above.
+- **Permissions:** allow Microphone, and Screen Recording for **What System Audio** (desktop
+  capture). The grant may need repeating after an update because the app is ad-hoc signed.
+- **First Start** downloads the speech model; later starts are offline.
+
+See [macOS packaging](docs/packaging_macos.md). This build has had less testing than the
+from-source path below.
+
+### Linux
+
+Download `what-<version>-x86_64.AppImage`, `chmod +x` it and run it. It needs **Python 3.12**
+(with `venv`) and **FFmpeg** on the machine, and creates its Python environment in
+`~/.config/What` on first start (Internet required). See [Linux packaging](docs/packaging_linux.md).
+The AppImage is newer than the Windows installer and has had less testing.
+
+Each platform can also run from source (see [Setup](#setup)).
 
 ## Platform status
 
@@ -55,8 +91,7 @@ These results are not a full v0.1 release certification. See the
 
 ## Setup
 
-Running from source (all platforms; on Windows the [installer](#download-windows) is the
-easy path). All platforms need **Python 3.12**, **Node.js/npm**, and **FFmpeg on PATH**. First model
+Running from source (all platforms; the [downloads](#download) above are the easy path). All platforms need **Python 3.12**, **Node.js/npm**, and **FFmpeg on PATH**. First model
 initialization needs Internet access to download the speech model; later cached loads are
 local. Per-platform helper scripts live in `scripts/setup/`.
 
@@ -136,14 +171,53 @@ In the GUI, choose Mic and/or Desktop and press Start. Use Settings to select th
 device, publication delay, or a local audio file for testing. On macOS, follow the microphone
 and desktop-audio permission prompts.
 
+<p align="center"><img src="docs/images/gui-replay.png" alt="The What window with separate Mic and Desktop transcript panels, replaying a Desktop passage" width="720"></p>
+
 - Scroll up to review speech; **Return to live** resumes following new speech.
 - Cmd- or Ctrl-click a word to replay its recording; untimed or corrected segments use
   passage-level timing. Stop playback with the playback control or Escape.
-- Double-click a segment to correct it; Enter saves and Escape cancels.
+- Double-click a segment to correct it; Enter saves and Escape cancels. Corrected segments are
+  underlined.
 - Change **Mic device** while running to reopen that input without restarting the service.
   **Transcript playback output** routes replay independently of the system default. Runtime
   switching is implemented with regression tests; hardware acceptance checks are still pending.
 - Desktop capture is suppressed during replay. Speaker playback can still reach a live mic.
+
+### Session files
+
+Each run writes two files into its session folder (**File → Show Session Folder**):
+
+- `transcript.txt`: everything that was said, from all sources, in time order. Each block
+  shows its time span and source (`Mic` or `Desktop`); review corrections are applied and
+  marked `(edited)`:
+
+  ```
+  [14:05:13 - 14:05:16] Mic
+      Okay, I think everyone's here. Can you hear me all right?
+
+  [14:05:17 - 14:05:18] Desktop
+      Yep, loud and clear.
+
+  [14:05:20 - 14:05:29] Mic (edited)
+      Great. So the plan today is to go over the release checklist for the Mac build. The
+      installer is done, and the transcript files are new in v0.1.
+  ```
+- `<session_id>.what`: the whole session in one file (each source's recording and segment
+  log, corrections, transcript), with the audio compressed losslessly (FLAC). It is written
+  when the session stops and refreshed after edits.
+
+<p align="center"><img src="docs/images/gui-edit.png" alt="A reopened session with a Mic segment selected for correction" width="720"></p>
+
+**File → Open Session…** (Cmd/Ctrl+O) opens a `.what` file, also one copied from another
+machine. Mic and desktop go back into their own panels, with replay and editing as during a
+live session. Pressing **Start** then adds to that session. **File → New Session** clears
+the panels so the next Start begins a new one. **File → Save Session As…** writes the
+session to a `.what` file of your choice. A session opened from, or saved to, a file outside
+the logs folder keeps that file up to date as you edit or continue it.
+
+The same operations are available on the command line: `what session transcript <folder>`,
+`what session pack <folder>` and `what session unpack <file.what>`. See
+[session files](docs/SESSION_FILES.md) for the formats.
 
 ## OBS captions
 
@@ -168,9 +242,10 @@ The older `/overlay` page and native What Captions source remain available durin
 
 Session recordings, transcripts, and corrections are stored locally in `logs/<session_id>/`.
 Older correction exports use `corrections/`. Both directories are ignored by Git, along with
-local `.env` files, audio fixtures, and build outputs. Current-session history is retained;
-reopening old sessions in the GUI is not implemented. Corrections are saved with provenance
-but do not yet train a model or change already-published captions.
+local `.env` files, audio fixtures, and build outputs. A `.what` session file contains the
+session's audio recordings, so treat it like the recording itself when sharing it.
+Corrections are saved with provenance but do not yet train a model or change
+already-published captions.
 
 The normal GUI binds services to loopback. Do not expose controller or overlay ports to the
 public Internet; they are local desktop interfaces, not a hardened hosted service.

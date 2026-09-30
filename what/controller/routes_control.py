@@ -1,6 +1,8 @@
+import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from ..session_files import finalize_session, is_safe_name
 from .native_desktop_backend import native_helper_capabilities
 from . import native_desktop_helper_manager
 from ..gpu import nvidia_memory
@@ -31,7 +33,17 @@ def register_control_routes(
     clamp_float,
     desktop_audio_receipt_path,
     detect_gpu_fn,
+    session_dir_for=None,
 ) -> None:
+    def resume_target(payload: dict) -> str:
+        """The session a Start should add to (a session reopened in the GUI), or ""."""
+        session_id = str(payload.get("resume_session_id") or "").strip()
+        if not session_id:
+            return ""
+        if session_dir_for is None or not is_safe_name(session_id) or not session_dir_for(session_id).is_dir():
+            raise HTTPException(status_code=400, detail=f"unknown session: {session_id}")
+        return session_id
+
     @app.get("/control/status")
     async def status() -> dict[str, object]:
         running = process_running_fn(state.process)
@@ -103,12 +115,16 @@ def register_control_routes(
     async def start(request: Request) -> dict[str, object]:
         payload = await read_json(request)
         settings = merge_settings(state.settings, payload, require_profile=True)
+        resume_id = resume_target(payload)
         stop_client_fn(state.client_process)
         state.client_process = None
-        close_process_log(state, clear_session=False)
+        close_process_log(state, clear_session=bool(resume_id))
         if process_running_fn(state.process):
             stop_service_fn(state.process)
         state.settings = settings
+        if resume_id:
+            # New client connections write new <client_id> files into the existing folder.
+            state.current_session_id = resume_id
         session_id = ensure_process_session(cfg, state)
         state.process = start_service_fn(cfg, settings, session_id=session_id)
         append_stream_log(state, f"service runtime flags: no_vad={'on' if settings.no_vad else 'off'}")
@@ -127,10 +143,11 @@ def register_control_routes(
             )
             start_stream_log_pump(state, state.client_process)
         persist_settings(cfg, state)
-        return {"ok": True}
+        return {"ok": True, "session_id": session_id}
 
     @app.post("/control/stop")
     async def stop() -> dict[str, object]:
+        session_id = state.current_session_id
         stop_client_fn(state.client_process)
         state.client_process = None
         try:
@@ -143,7 +160,14 @@ def register_control_routes(
         close_process_log(state, clear_session=True)
         stop_service_fn(state.process)
         state.process = None
-        return {"ok": True}
+        session_file = None
+        if session_id and session_dir_for is not None:
+            # The run is over: write transcript.txt and <session_id>.what for it.
+            session_file = await asyncio.to_thread(
+                finalize_session, session_dir_for(session_id),
+                lambda message: append_stream_log(state, message))
+        return {"ok": True, "session_id": session_id or "",
+                "session_file": str(session_file) if session_file else ""}
 
     @app.post("/control/apply")
     async def apply(request: Request) -> dict[str, object]:

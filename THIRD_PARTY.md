@@ -18,7 +18,7 @@ Notable components include:
   [Licensing](https://www.electronjs.org/docs/latest/tutorial/about#license).
 - Faster-Whisper and CTranslate2: separate optional engine dependencies; preserve their
   upstream notices if distributing them.
-- FFmpeg: installed externally from source checkouts; bundled in the Windows installer (below).
+- FFmpeg: installed externally from source checkouts; bundled in the Windows installer and the macOS app (below).
 - Model weights: downloaded separately. Consult the selected model's license and model card.
 
 ## Components bundled in the Windows installer
@@ -54,3 +54,13 @@ GPLv3 can be combined with GPLv2-or-later code when choosing the latter's v3 opt
 see the [GNU compatibility explanation](https://www.gnu.org/licenses/gpl-faq.html#v2v3Compatibility).
 This inventory is a good-faith summary, not legal advice. Re-check it when the bundled
 components or their versions change.
+
+## Components bundled in the macOS app
+
+The app (built by `scripts/package/build_macos.sh`; pins in `scripts/package/macos_pins.json`)
+also redistributes: Electron (as above); CPython from python-build-standalone with the
+Python packages listed in `gui/lib/python_runtime.js`; the WhisperKit worker
+(`native/WhisperKitWorker`, with its Swift package dependencies, see `Package.resolved`); and
+a static arm64 **FFmpeg** (GPL) from <https://github.com/eugeneware/ffmpeg-static> at
+`Contents/Resources/bin/ffmpeg`. The corresponding FFmpeg source is at
+<https://ffmpeg.org/releases/>.

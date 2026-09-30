@@ -262,3 +262,57 @@ def test_session_log_bootstrap_attaches_process_log_once(tmp_path):
     assert len(attached) == 1
     assert ui_lines == ["ui: hello", "ui: again"]
     assert second_heartbeat == first_heartbeat
+
+
+def _session_controller(monkeypatch):
+    cfg = ControllerConfig(host="127.0.0.1", port=8780, service_host="127.0.0.1",
+                           service_port=8765, config_path=None)
+    state = ControllerState()
+    started_sessions = []
+
+    def fake_start_service(_cfg, _settings, session_id=None):
+        started_sessions.append(session_id)
+        return DummyProc()
+
+    monkeypatch.setattr("what.controller.api.start_service", fake_start_service)
+    monkeypatch.setattr("what.controller.api.stop_service", lambda _proc: None)
+    monkeypatch.setattr("what.controller.api.start_client", lambda _cfg, _s: DummyProc())
+    monkeypatch.setattr("what.controller.api.stop_client", lambda _proc: None)
+    monkeypatch.setattr("what.controller.api.process_running", lambda proc: proc is not None)
+    monkeypatch.setattr("what.controller.api._wait_for_service_health", lambda *_a, **_k: None)
+    monkeypatch.setattr("what.controller.api._start_stream_log_pump", lambda *_a, **_k: None)
+    return TestClient(create_controller_app(cfg, state)), started_sessions
+
+
+def test_stop_writes_the_session_transcript_and_archive(monkeypatch, tmp_path):
+    client, started = _session_controller(monkeypatch)
+    assert client.post("/control/start", json={"profile": "cpu_friendly"}).status_code == 200
+    session_id = started[-1]
+    session_dir = tmp_path / "logs" / session_id
+    (session_dir / "mic-abc.jsonl").write_text(json.dumps({
+        "type": "segment", "client_id": "mic-abc", "input_source_id": "mic",
+        "stream_started_at": 1758191878.0,
+        "segments": [{"id": "s1", "abs_start": 1.0, "abs_end": 2.0, "text": " Hello."}],
+    }) + "\n")
+
+    body = client.post("/control/stop").json()
+
+    assert body["session_id"] == session_id
+    assert body["session_file"] == str(session_dir / f"{session_id}.what")
+    assert (session_dir / f"{session_id}.what").exists()
+    assert "Hello." in (session_dir / "transcript.txt").read_text()
+
+
+def test_start_can_continue_a_reopened_session(monkeypatch, tmp_path):
+    client, started = _session_controller(monkeypatch)
+    (tmp_path / "logs" / "2026-09-18_007_T103758").mkdir(parents=True)
+
+    resp = client.post("/control/start", json={
+        "profile": "cpu_friendly", "resume_session_id": "2026-09-18_007_T103758"})
+
+    assert resp.status_code == 200
+    assert resp.json()["session_id"] == "2026-09-18_007_T103758"
+    assert started[-1] == "2026-09-18_007_T103758"
+    for bad in ("2026-01-01_001_T000000", "../outside"):
+        resp = client.post("/control/start", json={"profile": "cpu_friendly", "resume_session_id": bad})
+        assert resp.status_code == 400

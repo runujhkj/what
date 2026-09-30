@@ -4,6 +4,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import uuid
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -12,6 +13,7 @@ from ..audio import pcm_frame_generator
 from .decode import start_opus_decoder
 from .pipeline import start_client_pipeline
 from .recording import recording_duration_sec, recording_enabled, tee_frames_to_wav
+from ..session_files import refresh_transcript
 from .runtime import ServiceRuntime
 from .tokens import consume_token
 from .types import ClientState
@@ -81,6 +83,9 @@ def register_ws(app: FastAPI, runtime: ServiceRuntime) -> None:
         # IDs must remain unique in the append-only JSONL. The offset is sample-derived,
         # so it also gives review playback a stable epoch that maps to this WAV exactly.
         recording_epoch = f"e{int(timeline_offset_sec * runtime.audio_cfg.sample_rate):012d}"
+        # Sample 0 of the recording in wall-clock time. On a reconnect the WAV already holds
+        # timeline_offset_sec of audio, so its start is that much before now.
+        stream_started_at = time.time() - timeline_offset_sec
 
         stop_event = threading.Event()
         decoder_proc = None
@@ -99,7 +104,7 @@ def register_ws(app: FastAPI, runtime: ServiceRuntime) -> None:
                 # dropped with 1006 before any error. asyncio.to_thread keeps the loop alive.
                 thread, transcript = await asyncio.to_thread(
                     start_client_pipeline, runtime, client_id, frames, log_path, stop_event, input_mode,
-                    timeline_offset_sec, recording_epoch, record)
+                    timeline_offset_sec, recording_epoch, record, stream_started_at=stream_started_at)
                 runtime.clients[client_id] = ClientState(
                     client_id=client_id,
                     transport=transport,
@@ -127,7 +132,7 @@ def register_ws(app: FastAPI, runtime: ServiceRuntime) -> None:
                 # dropped with 1006 before any error. asyncio.to_thread keeps the loop alive.
                 thread, transcript = await asyncio.to_thread(
                     start_client_pipeline, runtime, client_id, frames, log_path, stop_event, input_mode,
-                    timeline_offset_sec, recording_epoch, record)
+                    timeline_offset_sec, recording_epoch, record, stream_started_at=stream_started_at)
                 runtime.clients[client_id] = ClientState(
                     client_id=client_id,
                     transport=transport,
@@ -176,3 +181,8 @@ def register_ws(app: FastAPI, runtime: ServiceRuntime) -> None:
             # sample length; renaming the JSONL here made the review UI retain old spans
             # while the next client created a fresh, shorter log at the same path. That
             # mapped a post-restart click back into earlier recording audio.
+
+            # Keep the session's all-source transcript current as each source finishes.
+            await asyncio.to_thread(
+                refresh_transcript, state.session_dir,
+                lambda msg: (sys.stderr.write(msg + "\n"), sys.stderr.flush()))

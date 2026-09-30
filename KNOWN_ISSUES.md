@@ -36,9 +36,13 @@
 
 Accepted limitations for v0.1.
 
-- Review covers the current session only. Pressing Start begins a new session and clears the
-  panels; earlier sessions are not reloaded (their recordings, transcripts and corrections
-  remain in `logs/<session_id>/`).
+- Earlier sessions are reopened only through **File → Open Session** with their `.what`
+  file. A session whose run ended without the controller stopping it (a crash or a killed
+  process) has no `.what` file yet; `what session pack logs/<session_id>` writes one.
+- The session folder keeps its recordings as uncompressed WAV (about 115 MB per source per
+  hour) so they can be replayed and appended to directly; only the `.what` copy is
+  compressed (FLAC). Without FFmpeg the `.what` file stores the WAV as is.
+- Opening a `.what` file by double-clicking it is not set up yet; use File → Open Session.
 - Replay through speakers can still be picked up by a live microphone. Desktop capture is
   silenced during replay, but the mic is not; use headphones or stop the mic source.
 - A correction covers one segment. An edit spanning two segments is saved as two corrections,

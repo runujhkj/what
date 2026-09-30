@@ -20,8 +20,12 @@ struct Config {
     var testTone: Bool = false
     var socketPath: String? = nil
     // When true: don't exit on 10s no-client timeout or on all-clients-disconnect.
-    // Use with a LaunchAgent so the tap stays alive between Electron sessions.
+    // Used by the app's LaunchAgent so the tap survives client restarts; --owner-pid still
+    // ends it when the app exits.
     var persistent: Bool = false
+    // PID of the app that started the tap. The tap exits when that process exits (including
+    // a crash or force quit), so it never outlives the GUI.
+    var ownerPid: pid_t? = nil
 }
 
 func parseArgs() -> Config {
@@ -46,6 +50,9 @@ func parseArgs() -> Config {
             if i < CommandLine.arguments.count { cfg.socketPath = CommandLine.arguments[i] }
         case "--persistent":
             cfg.persistent = true
+        case "--owner-pid":
+            i += 1
+            if i < CommandLine.arguments.count { cfg.ownerPid = pid_t(CommandLine.arguments[i]) }
         default:
             fputs("unknown argument: \(arg)\n", stderr)
         }
@@ -320,9 +327,37 @@ func runCapture(sampleRate: Int, channels: Int, frameMs: Int) {
     _ = liveStream
 }
 
+// MARK: - Owner watch
+
+var gOwnerWatch: DispatchSourceProcess? = nil
+
+func ownerGone(_ pid: pid_t) -> Bool {
+    return kill(pid, 0) != 0 && errno == ESRCH
+}
+
+// Exit 0 when the owning app exits. Exit status 0 also tells launchd (KeepAlive
+// SuccessfulExit=false) not to restart the tap.
+func watchOwner(_ pid: pid_t) {
+    let quit: () -> Void = {
+        fputs("[tap] owner process \(pid) exited, exiting\n", stderr)
+        exit(0)
+    }
+    if ownerGone(pid) { quit() }
+    let src = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .global())
+    src.setEventHandler(handler: quit)
+    src.resume()
+    gOwnerWatch = src
+    // The owner may have exited between the check and the source starting.
+    if ownerGone(pid) { quit() }
+}
+
 // MARK: - Entry point
 
 let config = parseArgs()
+
+if let pid = config.ownerPid {
+    watchOwner(pid)
+}
 
 if let sp = config.socketPath {
     guard let srv = SocketServer(path: sp, persistent: config.persistent) else {

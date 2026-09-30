@@ -1,5 +1,6 @@
 """Exercise actual websocket ingest, WAV tee and recording metadata without a model."""
 import threading
+import time
 import wave
 from types import SimpleNamespace
 
@@ -23,7 +24,11 @@ def test_websocket_pcm_records_and_reports_audio(tmp_path, monkeypatch):
     )
     consumed = threading.Event()
     events = []
-    def pipeline(rt, client_id, frames, log_path, stop, mode, offset, epoch, recorded):
+    anchors = []
+
+    def pipeline(rt, client_id, frames, log_path, stop, mode, offset, epoch, recorded,
+                 stream_started_at=None):
+        anchors.append(stream_started_at)
         def work():
             try:
                 for frame in frames:
@@ -48,6 +53,8 @@ def test_websocket_pcm_records_and_reports_audio(tmp_path, monkeypatch):
         assert consumed.wait(3)
     with wave.open(str(tmp_path / "linux-session" / "mic-test.wav")) as wav:
         assert wav.readframes(480) == pcm
+    # A new recording starts now: its wall-clock anchor is the connection time.
+    assert len(anchors) == 1 and abs(anchors[0] - time.time()) < 10
     assert events[0]["recorded"] is True
     assert events[0]["client_id"] == "mic-test"
     assert events[0]["session_id"] == "linux-session"

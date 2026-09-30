@@ -46,9 +46,37 @@ jobs:
           path: gui/dist/*.AppImage
           if-no-files-found: error
 
+  # Apple Silicon only. Ad-hoc signed unless the repository has the Developer ID secrets
+  # (CSC_LINK = base64 .p12, CSC_KEY_PASSWORD, and for notarization APPLE_ID,
+  # APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID); see docs/packaging_macos.md.
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Build app
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          swift --version
+          bash scripts/package/build_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: |
+            gui/dist/*.dmg
+            gui/dist/*-mac.zip
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux]
+    needs: [windows, linux, macos]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4

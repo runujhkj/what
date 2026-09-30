@@ -11,7 +11,8 @@
     "prepare:pyruntime": "bash ../scripts/package/prepare_python_runtime.sh",
     "dist:linux": "npm run prepare:pyruntime && electron-builder --linux AppImage",
     "test": "node --test tests/all.node.test.js",
-    "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/package/build_windows.ps1"
+    "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/package/build_windows.ps1",
+    "dist:mac": "bash ../scripts/package/build_macos.sh"
   },
   "devDependencies": {
     "electron": "^30.0.0",
@@ -89,6 +90,43 @@
       "installerIcon": "icons/icon.ico",
       "uninstallerIcon": "icons/icon.ico",
       "shortcutName": "What"
+    },
+    "afterPack": "build-hooks/adhoc-sign.js",
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.video",
+      "icon": "icons/icon.png",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "What transcribes your microphone locally to produce live captions."
+      },
+      "extraResources": [
+        {
+          "from": "build/python",
+          "to": "python"
+        },
+        {
+          "from": "build/bin",
+          "to": "bin"
+        }
+      ]
+    },
+    "dmg": {
+      "artifactName": "what-${version}-${arch}.${ext}"
     }
   }
 }

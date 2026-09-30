@@ -7,7 +7,7 @@ for (const stream of [process.stdout, process.stderr]) {
   if (stream && typeof stream.on === "function") stream.on("error", () => {});
 }
 const { stopProcess } = require("./lib/client_process_stop");
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell, screen } = require("electron");
 // Keep settings, the GPU runtime and (packaged) logs under a stable "What" folder rather
 // than one named after the npm package. Must run before anything reads userData.
 {
@@ -50,6 +50,10 @@ const mainOverlayTestStreamRuntime = require("./lib/main_overlay_test_stream_run
 const mainTestStreamBridge = require("./lib/main_test_stream_bridge");
 const mainOverlayIngestGate = require("./lib/main_overlay_ingest_gate");
 const mainOverlayBroadcastRuntime = require("./lib/main_overlay_broadcast_runtime");
+const { buildMenuTemplate } = require("./lib/app_menu");
+const { createSessionArchive } = require("./lib/session_archive");
+const { loadSessionDir } = require("./lib/session_loader");
+const { createSessionWorkspace } = require("./lib/session_workspace");
 
 let mainWindow = null;
 let desktopAudioStubWindow = null;
@@ -76,6 +80,21 @@ const WHAT_PATHS = runtimePaths.computePaths({
   env: process.env,
 });
 const SERVICE_LOGS_DIR = WHAT_PATHS.logsDir;
+// File menu session commands (open/save .what files, show folder, new session).
+const sessionWorkspace = createSessionWorkspace({
+  dialog,
+  shell,
+  // Resolved per call: a packaged app sets WHAT_PYTHON only once it is ready.
+  getArchive: () => createSessionArchive({
+    spawn,
+    python: runtimePaths.resolvePython({ pythonRoot: WHAT_PATHS.pythonRoot, env: process.env }),
+    cwd: WHAT_PATHS.pythonRoot,
+  }),
+  loadSessionDir,
+  logsDir: SERVICE_LOGS_DIR,
+  getWindow: () => mainWindow,
+  isCapturing: () => [clientProc, desktopClientProc].some((p) => p && p.exitCode === null),
+});
 
 // Second client process for desktop tap audio, used when both mic and desktop are active.
 let desktopClientProc = null;
@@ -241,8 +260,13 @@ const overlayServerRuntime = overlayServerRuntimeFactory.createOverlayServerRunt
   logError: (...args) => console.error(...args)
 });
 
+function displayWorkAreas() {
+  try { return screen.getAllDisplays().map((d) => d.workArea); } catch (_) { return []; }
+}
+
 function loadWindowState() {
-  return windowStateStore.loadWindowStateFromDisk(fs, windowStatePath, { width: 900, height: 700 });
+  const saved = windowStateStore.loadWindowStateFromDisk(fs, windowStatePath, { width: 900, height: 700 });
+  return windowStateStore.fitToDisplays(saved, displayWorkAreas());
 }
 
 function saveWindowState(win) {
@@ -250,7 +274,8 @@ function saveWindowState(win) {
 }
 
 function loadDesktopStubWindowState() {
-  return windowStateStore.loadWindowStateFromDisk(fs, desktopStubWindowStatePath, { width: 520, height: 420 });
+  const saved = windowStateStore.loadWindowStateFromDisk(fs, desktopStubWindowStatePath, { width: 520, height: 420 });
+  return windowStateStore.fitToDisplays(saved, displayWorkAreas());
 }
 
 function saveDesktopStubWindowState(win) {
@@ -294,6 +319,8 @@ function resolveWhatCli() {
 // Build once with: native/what-coreaudio-tap/build.sh
 function resolveTapApp() {
   if (process.env.WHAT_TAP_APP) return process.env.WHAT_TAP_APP;
+  // Packaged macOS app: the prebuilt tap ships in resources/bin (see scripts/package/build_macos.sh).
+  if (app.isPackaged) return path.join(process.resourcesPath, "bin", "WhatCoreAudioTap.app");
   return path.join(__dirname, "..", "bin", "WhatCoreAudioTap.app");
 }
 
@@ -312,8 +339,38 @@ function resolveTapBin() {
 const AGENT_LABEL = "com.what.coreaudio-tap";
 const AGENT_SOCKET_PATH = "/tmp/what-coreaudio-tap.sock";
 
+// Every tap the app starts gets this, and exits when this process exits (see
+// bin/what-coreaudio-tap.swift), so a crash or force quit cannot leave one running.
+function tapOwnerArgs() {
+  return ["--owner-pid", String(process.pid)];
+}
+
+// The agent plist lives in the app's data dir, NOT ~/Library/LaunchAgents: launchd only
+// auto-loads that folder at login, so an agent loaded from here lasts for this login
+// session at most and is never relaunched on its own.
 function tapPlistPath() {
-  return path.join(app.getPath("home"), "Library", "LaunchAgents", `${AGENT_LABEL}.plist`);
+  return path.join(app.getPath("userData"), `${AGENT_LABEL}.plist`);
+}
+
+// Older versions wrote a RunAtLoad + KeepAlive agent into ~/Library/LaunchAgents and removed
+// it only on a clean quit, so after a crash or force quit launchd kept a tap running
+// indefinitely and restarted it at every login. Remove that agent. The opt-in agent that
+// native/what-coreaudio-tap/build.sh installs (WHAT_INSTALL_LAUNCHAGENT=1, no KeepAlive) is
+// the user's choice and is left alone.
+function retireLegacyTapAgent() {
+  if (process.platform !== "darwin") return;
+  const legacy = path.join(app.getPath("home"), "Library", "LaunchAgents", `${AGENT_LABEL}.plist`);
+  let text;
+  try { text = fs.readFileSync(legacy, "utf8"); } catch (_) { return; }
+  if (!text.includes("<key>KeepAlive</key>")) return;
+  try { spawnSync("launchctl", ["unload", legacy], { stdio: "ignore" }); } catch (_) {}
+  try { fs.unlinkSync(legacy); } catch (_) {}
+  console.log(`[tap] removed leftover LaunchAgent ${legacy}`);
+}
+
+function unloadTapAgent() {
+  try { spawnSync("launchctl", ["remove", AGENT_LABEL], { stdio: "ignore" }); } catch (_) {}
+  try { fs.unlinkSync(tapPlistPath()); } catch (_) {}
 }
 
 function writeTapPlist(binaryPath) {
@@ -332,11 +389,16 @@ function writeTapPlist(binaryPath) {
     '        <string>--socket-path</string>',
     `        <string>${AGENT_SOCKET_PATH}</string>`,
     '        <string>--persistent</string>',
+    ...tapOwnerArgs().map((a) => `        <string>${a}</string>`),
     '    </array>',
     '    <key>RunAtLoad</key>',
     '    <true/>',
+    // Restart after a crash only: the tap exits 0 when the app exits.
     '    <key>KeepAlive</key>',
-    '    <true/>',
+    '    <dict>',
+    '        <key>SuccessfulExit</key>',
+    '        <false/>',
+    '    </dict>',
     '    <key>StandardErrorPath</key>',
     '    <string>/tmp/what-coreaudio-tap.log</string>',
     '</dict>',
@@ -401,34 +463,40 @@ async function ensureTapSetup(onLog) {
   const tapBin = path.join(tapApp, "Contents", "MacOS", "WhatCoreAudioTap");
   const plist = tapPlistPath();
 
-  if (!fs.existsSync(tapBin)) {
+  // A source checkout rebuilds a tap older than its Swift source (e.g. one built before
+  // --owner-pid existed). The packaged app ships no source, so this never triggers there.
+  const tapSrc = path.join(__dirname, "..", "bin", "what-coreaudio-tap.swift");
+  let tapStale = false;
+  try { tapStale = fs.statSync(tapSrc).mtimeMs > fs.statSync(tapBin).mtimeMs; } catch (_) {}
+
+  if (!fs.existsSync(tapBin) || tapStale) {
     const swiftcCheck = spawnSync("which", ["swiftc"], { stdio: "pipe" });
     if (swiftcCheck.status !== 0) {
       onLog("[setup] swiftc not found — install Xcode Command Line Tools: xcode-select --install\n");
-      return { ok: false, error: "no_swiftc" };
+      if (!tapStale) return { ok: false, error: "no_swiftc" };
+    } else {
+      onLog(`[setup] ${tapStale ? "Tap source changed" : "First run"}: building WhatCoreAudioTap.app (~15s)...\n`);
+      try {
+        await buildTapBinary(onLog);
+        onLog("[setup] Build complete.\n");
+      } catch (err) {
+        onLog(`[setup] Build failed: ${err.message}\n`);
+        if (!tapStale) return { ok: false, error: "build_failed" };
+        onLog("[setup] Using the existing (older) tap build.\n");
+      }
     }
-    onLog("[setup] First run: building WhatCoreAudioTap.app (~15s)...\n");
-    try {
-      await buildTapBinary(onLog);
-      onLog("[setup] Build complete.\n");
-    } catch (err) {
-      onLog(`[setup] Build failed: ${err.message}\n`);
-      return { ok: false, error: "build_failed" };
-    }
-    // build.sh already wrote the plist — skip the write below
-  } else if (!fs.existsSync(plist)) {
-    onLog("[setup] Writing LaunchAgent plist...\n");
-    writeTapPlist(tapBin);
   }
 
-  if (!isTapAgentLoaded()) {
-    onLog("[setup] Loading com.what.coreaudio-tap LaunchAgent...\n");
-    try {
-      loadTapAgent(plist);
-    } catch (err) {
-      onLog(`[setup] Failed to load LaunchAgent: ${err.message}\n`);
-      return { ok: false, error: "load_failed" };
-    }
+  // The plist names this app's PID, so write it and (re)load the agent every time: an agent
+  // left loaded from an earlier session belongs to a process that is gone.
+  onLog("[setup] Loading com.what.coreaudio-tap LaunchAgent...\n");
+  try {
+    if (isTapAgentLoaded()) unloadTapAgent();
+    writeTapPlist(tapBin);
+    loadTapAgent(plist);
+  } catch (err) {
+    onLog(`[setup] Failed to load LaunchAgent: ${err.message}\n`);
+    return { ok: false, error: "load_failed" };
   }
 
   try {
@@ -537,14 +605,14 @@ async function startClient(opts) {
         // giving only the ~45-60s grace period. This is the fallback path.
         // For indefinite capture: load the LaunchAgent printed by build.sh.
         sendClientLog(`[tap] launching via open -n (fallback — install LaunchAgent for indefinite capture)\n`);
-        const opener = spawn("open", ["-n", tapApp, "--args", "--socket-path", tapSocketPath],
+        const opener = spawn("open", ["-n", tapApp, "--args", "--socket-path", tapSocketPath, ...tapOwnerArgs()],
           { detached: true, stdio: "ignore" });
         opener.unref();
       } else {
         const tapBin = resolveTapBin();
         sendClientLog(`[tap] WhatCoreAudioTap.app not found; launching fallback: ${tapBin}\n`);
         sendClientLog(`[tap] run native/what-coreaudio-tap/build.sh for proper TCC isolation\n`);
-        const tp = spawn(tapBin, ["--socket-path", tapSocketPath],
+        const tp = spawn(tapBin, ["--socket-path", tapSocketPath, ...tapOwnerArgs()],
           { detached: true, stdio: "ignore" });
         tp.unref();
       }
@@ -608,7 +676,7 @@ async function stopClient() {
     tapSocket.destroy();
     tapSocket = null;
   }
-  // Do NOT pkill the tap: a persistent LaunchAgent must keep running.
+  // Do NOT pkill the tap: the app's LaunchAgent tap stays up until the app quits.
   // A non-persistent tap exits on its own when its last socket client disconnects.
   if (!clientProc || clientProc.exitCode !== null) {
     return { ok: true, running: false };
@@ -786,22 +854,25 @@ function startPackagedController() {
   }
 }
 
+// A packaged app has no console, so a startup error would otherwise leave the app in the
+// Dock with no window and no explanation. Record it and tell the user.
+function reportStartupError(step, err) {
+  const text = `${new Date().toISOString()} ${step}: ${(err && err.stack) || err}\n`;
+  console.error(text);
+  try { fs.appendFileSync(path.join(app.getPath("userData"), "startup-errors.log"), text); } catch (_) {}
+  try { dialog.showErrorBox("What: startup error", `${step} failed:\n\n${(err && err.message) || err}`); } catch (_) {}
+}
+
 app.whenReady().then(() => {
-  // Packaged: the default cwd (bundled source) is read-only, so point the Python side's
-  // recordings/transcripts at the writable logs dir. Inherited by every spawn below.
-  if (app.isPackaged && !process.env.WHAT_JSONL_DIR) {
-    try { fs.mkdirSync(WHAT_PATHS.logsDir, { recursive: true }); } catch (_) {}
-    process.env.WHAT_JSONL_DIR = WHAT_PATHS.logsDir;
+  try {
+    prepareRuntime();
+  } catch (err) {
+    reportStartupError("Preparing the runtime", err);
   }
-  if (app.isPackaged) {
-    // Bundled tools (ffmpeg) come first on PATH for every helper process.
-    const bundledBin = path.join(process.resourcesPath, "bin");
-    if (fs.existsSync(bundledBin)) process.env.PATH = `${bundledBin}${path.delimiter}${process.env.PATH || ""}`;
-    // A writable home for the CUDA runtime wheels (the install folder may be read-only).
-    if (!process.env.WHAT_CUDA_TARGET) process.env.WHAT_CUDA_TARGET = path.join(app.getPath("userData"), "cuda-runtime");
-  }
-  ensurePackagedPythonRuntime();
-  preparePackagedGpuRuntime().then(startPackagedController);
+  Menu.setApplicationMenu(Menu.buildFromTemplate(buildMenuTemplate({
+    appName: app.getName(),
+    actions: sessionWorkspace,
+  })));
   if (String(process.env.WHAT_GUI_MODE || "").trim() === "desktop-audio-stub") {
     createDesktopAudioStubWindow();
   } else {
@@ -817,7 +888,33 @@ app.whenReady().then(() => {
       }
     }
   });
-});
+}).catch((err) => reportStartupError("Starting the app", err));
+
+function prepareRuntime() {
+  retireLegacyTapAgent();
+  // Packaged: the default cwd (bundled source) is read-only, so point the Python side's
+  // recordings/transcripts at the writable logs dir. Inherited by every spawn below.
+  if (app.isPackaged && !process.env.WHAT_JSONL_DIR) {
+    try { fs.mkdirSync(WHAT_PATHS.logsDir, { recursive: true }); } catch (_) {}
+    process.env.WHAT_JSONL_DIR = WHAT_PATHS.logsDir;
+  }
+  if (app.isPackaged) {
+    // Bundled tools (ffmpeg) come first on PATH for every helper process.
+    const bundledBin = path.join(process.resourcesPath, "bin");
+    if (fs.existsSync(bundledBin)) process.env.PATH = `${bundledBin}${path.delimiter}${process.env.PATH || ""}`;
+    // The macOS app ships the prebuilt WhisperKit worker next to ffmpeg.
+    const bundledWorker = path.join(bundledBin, "what-whisperkit-worker");
+    if (process.platform === "darwin" && !process.env.WHAT_WHISPERKIT_WORKER && fs.existsSync(bundledWorker)) {
+      process.env.WHAT_WHISPERKIT_WORKER = bundledWorker;
+    }
+    // A writable home for the CUDA runtime wheels (the install folder may be read-only).
+    if (!process.env.WHAT_CUDA_TARGET) process.env.WHAT_CUDA_TARGET = path.join(app.getPath("userData"), "cuda-runtime");
+  }
+  ensurePackagedPythonRuntime();
+  preparePackagedGpuRuntime()
+    .then(startPackagedController)
+    .catch((err) => reportStartupError("Starting the controller", err));
+}
 
 // Ask the controller to cleanly stop its child processes (transcription client
 // + Whisper service) before we SIGTERM the controller process itself.
@@ -830,8 +927,10 @@ function _httpControllerStop(host, port) {
       (res) => { res.resume(); resolve(); }
     );
     req.on("error", resolve);
-    // stop_client + stop_service each wait up to 2s, so allow 6s total.
-    req.setTimeout(6000, () => { req.destroy(); resolve(); });
+    // stop_client + stop_service each wait up to 2s, then the controller writes the session's
+    // transcript and .what file (a few seconds for a long session). Killing the controller
+    // mid-write would leave no session file, so allow more than that.
+    req.setTimeout(30000, () => { req.destroy(); resolve(); });
     req.write("{}");
     req.end();
   });
@@ -871,6 +970,11 @@ app.on("before-quit", (event) => {
     const ctrlHost = "127.0.0.1";
     const ctrlPort = 8780;
     await _httpControllerStop(ctrlHost, ctrlPort);
+    // Write review edits that are still batched into the session's transcript and .what file.
+    await Promise.race([
+      sessionWorkspace.flush().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 5000)),
+    ]);
 
     // If we started the controller (packaged app), terminate it so it and its Whisper
     // service don't outlive the GUI.
@@ -886,20 +990,13 @@ app.on("before-quit", (event) => {
     try { await stopClient(); } catch (err) { console.error("capture shutdown:", err.message); }
     await _waitForExit(clientProc, 3000);
 
-    // Stop the tap so the SCStream ends and the macOS "sharing" indicator clears.
-    // launchctl unload is required when the LaunchAgent is registered: pkill alone
-    // loses the race because KeepAlive: true brings the tap back in <300ms and the
-    // tap restarts SCStream immediately (before any socket client connects).
-    // unload stops the tap for THIS session, but the plist has RunAtLoad+KeepAlive,
-    // so leaving it on disk means launchd re-launches the persistent tap at the
-    // NEXT login with no GUI running -- the "screen is being observed" indicator
-    // then shows forever. So delete the plist too; ensureTapSetup rewrites and
-    // reloads it on the next launch. For a directly-launched (non-LaunchAgent) tap,
-    // kill by full command path because the process comm is truncated to 15 chars
-    // on macOS and won't match a 16-char -x pattern.
+    // Stop the tap now so the SCStream ends and the macOS "sharing" indicator clears
+    // (each tap also exits on its own once this process is gone, via --owner-pid).
+    // Remove our LaunchAgent rather than pkill: launchd would restart a killed tap.
+    // For a directly-launched (non-LaunchAgent) tap, kill by full command path because
+    // the process comm is truncated to 15 chars on macOS and won't match a 16-char -x pattern.
     if (isTapAgentLoaded()) {
-      try { spawnSync("launchctl", ["unload", tapPlistPath()], { stdio: "ignore" }); } catch (_) {}
-      try { fs.unlinkSync(tapPlistPath()); } catch (_) {}
+      unloadTapAgent();
     } else if (tapLaunchedByUs || desktopTapLaunchedByUs) {
       try { spawnSync("pkill", ["-f", "WhatCoreAudioTap"], { stdio: "ignore" }); } catch (_) {}
     }
@@ -916,9 +1013,8 @@ app.on("window-all-closed", () => {
 });
 
 // A terminal Ctrl+C or external `kill` bypasses Electron's normal window-close
-// path entirely, so without these the before-quit cleanup above never runs and
-// the tap LaunchAgent (KeepAlive: true) is left registered — launchd then keeps
-// resurrecting the tap process forever, no matter how many times it's pkilled.
+// path entirely, so without these the before-quit cleanup above never runs. (A SIGKILL
+// or crash still skips it; the taps' --owner-pid watch covers that case.)
 process.on("SIGINT", () => app.quit());
 process.on("SIGTERM", () => app.quit());
 
@@ -1018,13 +1114,13 @@ async function startDesktopClient(opts) {
     desktopTapLaunchedByUs = true;
     if (fs.existsSync(tapBinInApp)) {
       sendDesktopClientLog("[tap] launching via open -n\n");
-      const opener = spawn("open", ["-n", tapApp, "--args", "--socket-path", desktopTapSocketPath],
+      const opener = spawn("open", ["-n", tapApp, "--args", "--socket-path", desktopTapSocketPath, ...tapOwnerArgs()],
         { detached: true, stdio: "ignore" });
       opener.unref();
     } else {
       const tapBin = resolveTapBin();
       sendDesktopClientLog(`[tap] launching fallback: ${tapBin}\n`);
-      const tp = spawn(tapBin, ["--socket-path", desktopTapSocketPath],
+      const tp = spawn(tapBin, ["--socket-path", desktopTapSocketPath, ...tapOwnerArgs()],
         { detached: true, stdio: "ignore" });
       tp.unref();
     }
@@ -1092,9 +1188,14 @@ ipcMain.handle("resolve-recording", (_event, opts) => {
   return result.ok ? { ...result, url: pathToFileURL(result.path).href } : result;
 });
 ipcMain.handle("audio-defaults", () => audioDefaults.readDefaultDevices());
-ipcMain.handle("save-session-correction", (_event, correction) =>
-  sessionCorrections.appendSessionCorrection({ logsDir: SERVICE_LOGS_DIR, correction })
-);
+ipcMain.handle("save-session-correction", (_event, correction) => {
+  const result = sessionCorrections.appendSessionCorrection({ logsDir: SERVICE_LOGS_DIR, correction });
+  // Keep transcript.txt and the session's .what file in step with review edits.
+  if (result.ok) sessionWorkspace.correctionSaved(correction.session_id);
+  return result;
+});
+ipcMain.handle("set-session-context", (_event, sessionId) => sessionWorkspace.setContext(sessionId));
+ipcMain.handle("session-stopped", (_event, sessionId) => sessionWorkspace.sessionStopped(sessionId));
 ipcMain.handle("set-review-playback", (_event, opts) =>
   reviewSuppressor.setActive(Boolean(opts && opts.active), opts && opts.maxMs)
 );
